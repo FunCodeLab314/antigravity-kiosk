@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
@@ -20,8 +21,20 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Disable Google Fonts runtime fetching to avoid AssetManifest.json errors
+  GoogleFonts.config.allowRuntimeFetching = false;
+
   // Initialize Firebase using the credentials you just generated
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    print(
+      'Firebase initialized for project: ${DefaultFirebaseOptions.currentPlatform.projectId}',
+    );
+  } catch (e) {
+    print('Firebase initialization error: $e');
+  }
 
   // Lock to landscape (kiosk-like)
   SystemChrome.setPreferredOrientations([
@@ -37,8 +50,10 @@ class PillPalApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final baseTextStyle = GoogleFonts.montserrat(
-      textStyle: const TextStyle(color: Colors.white),
+    // Use system font directly without GoogleFonts to avoid AssetManifest issues
+    final baseTextStyle = const TextStyle(
+      color: Colors.white,
+      fontFamily: 'Roboto',
     );
 
     return ChangeNotifierProvider(
@@ -79,8 +94,12 @@ class PillPalApp extends StatelessWidget {
 class Medication {
   String name;
   Medication({required this.name});
-  factory Medication.fromJson(Map<dynamic, dynamic> j) =>
-      Medication(name: j['name'] ?? '');
+  factory Medication.fromJson(dynamic j) {
+    if (j == null) return Medication(name: '');
+    if (j is String) return Medication(name: j);
+    if (j is Map) return Medication(name: j['name'] ?? '');
+    return Medication(name: j.toString());
+  }
   Map<String, dynamic> toJson() => {'name': name};
 }
 
@@ -89,21 +108,51 @@ class AlarmModel {
   int minute;
   bool isActive;
   List<Medication> meds;
+  String? id;
 
   AlarmModel({
     required this.hour,
     required this.minute,
     required this.isActive,
     required this.meds,
+    this.id,
   });
 
   factory AlarmModel.fromJson(Map<dynamic, dynamic> j) {
-    var medsJson = j['meds'] as List? ?? [];
+    // Support both List and Map representations from Realtime Database
+    var medsField =
+        j['meds'] ?? j['medications']; // Try 'meds' or 'medications' field
+    List medsList = [];
+    if (medsField is List) {
+      medsList = medsField;
+    } else if (medsField is Map) {
+      medsList = medsField.values.toList();
+    }
+
+    // Parse hour and minute from either separate fields or timeOfDay string
+    int hour = 0;
+    int minute = 0;
+
+    if (j.containsKey('hour') && j.containsKey('minute')) {
+      // If separate fields exist, use them
+      hour = int.tryParse(j['hour'].toString()) ?? 0;
+      minute = int.tryParse(j['minute'].toString()) ?? 0;
+    } else if (j.containsKey('timeOfDay')) {
+      // Parse timeOfDay string like "01:43" or "14:30"
+      final timeOfDay = j['timeOfDay']?.toString() ?? '';
+      final parts = timeOfDay.split(':');
+      if (parts.length == 2) {
+        hour = int.tryParse(parts[0]) ?? 0;
+        minute = int.tryParse(parts[1]) ?? 0;
+      }
+    }
+
     return AlarmModel(
-      hour: int.tryParse(j['hour'].toString()) ?? 0,
-      minute: int.tryParse(j['minute'].toString()) ?? 0,
+      hour: hour,
+      minute: minute,
       isActive: j['isActive'] ?? true,
-      meds: medsJson.map((m) => Medication.fromJson(m)).toList(),
+      meds: medsList.map((m) => Medication.fromJson(m)).toList(),
+      id: j['__id']?.toString(),
     );
   }
 }
@@ -113,21 +162,38 @@ class Patient {
   int age;
   int slotNumber;
   List<AlarmModel> alarms;
+  String? id;
 
   Patient({
     required this.name,
     required this.age,
     required this.slotNumber,
     required this.alarms,
+    this.id,
   });
 
   factory Patient.fromJson(Map<dynamic, dynamic> j) {
-    var alarmsJson = j['alarms'] as List? ?? [];
+    // Support both List and Map representations from Realtime Database
+    var alarmsField = j['alarms'];
+    List alarmsList = [];
+    if (alarmsField is List) {
+      alarmsList = alarmsField;
+    } else if (alarmsField is Map) {
+      // If alarms is a map, inject the alarm ID from the key
+      alarmsField.forEach((key, alarmData) {
+        if (alarmData is Map) {
+          alarmData['__id'] = key;
+        }
+      });
+      alarmsList = alarmsField.values.toList();
+    }
+
     return Patient(
       name: j['name'] ?? '',
       age: int.tryParse(j['age'].toString()) ?? 0,
       slotNumber: int.tryParse(j['slotNumber'].toString()) ?? 0,
-      alarms: alarmsJson.map((a) => AlarmModel.fromJson(a)).toList(),
+      alarms: alarmsList.map((a) => AlarmModel.fromJson(a)).toList(),
+      id: j['__id']?.toString(),
     );
   }
 }
@@ -168,37 +234,134 @@ class AppState extends ChangeNotifier {
     });
 
     Future.microtask(() {
-      _connectMqtt();
+      try {
+        _connectMqtt().catchError((e) => print('MQTT init error: $e'));
+      } catch (e) {
+        print('MQTT exception: $e');
+      }
       _listenToFirebase();
+      // TODO: Remove this test data once Firebase Realtime Database security rules are fixed
+      _loadTestData();
     });
+  }
+
+  // Temporary test data for alarm testing (remove once Firebase is working)
+  void _loadTestData() {
+    try {
+      print('DEBUG: Starting _loadTestData()');
+      final now = DateTime.now();
+      print('DEBUG: Current time is ${now.hour}:${now.minute}:${now.second}');
+      final testPatients = [
+        Patient(
+          name: 'Test Patient',
+          age: 65,
+          slotNumber: 1,
+          alarms: [
+            AlarmModel(
+              hour: now.hour,
+              minute: now.minute,
+              isActive: true,
+              meds: [
+                Medication(name: 'Aspirin'),
+                Medication(name: 'Vitamin D'),
+              ],
+            ),
+          ],
+          id: 'test_patient_1',
+        ),
+      ];
+      patients = testPatients;
+      notifyListeners();
+      print('DEBUG: Loaded test data: ${patients.length} test patients');
+    } catch (e) {
+      print('ERROR loading test data: $e');
+    }
   }
 
   int get patientCount => patients.length;
 
   // --- FIREBASE LISTENER ---
   void _listenToFirebase() {
-    _dbRef.child('patients').onValue.listen((event) {
-      try {
-        final data = event.snapshot.value;
-        List<Patient> newPatients = [];
+    // One-time fetch to help debug initial sync
+    _dbRef
+        .child('patients')
+        .get()
+        .then((snap) {
+          print('Firebase initial fetch type: ${snap.value.runtimeType}');
+        })
+        .catchError((e) {
+          print('Firebase initial fetch error: $e');
+        });
 
-        if (data is List) {
-          for (var item in data) {
-            if (item != null) newPatients.add(Patient.fromJson(item));
-          }
-        } else if (data is Map) {
-          data.forEach((key, value) {
-            newPatients.add(Patient.fromJson(value));
-          });
+    _dbRef
+        .child('patients')
+        .onValue
+        .listen(
+          (event) {
+            try {
+              final data = event.snapshot.value;
+              // Helpful debug logging to understand data shape coming from RTDB
+              try {
+                print('Firebase snapshot type: ${data.runtimeType}');
+                // Avoid throwing for non-encodable types
+                print('Raw snapshot (preview): ${jsonEncode(data)}');
+              } catch (e) {
+                print('Firebase snapshot debug encode failed: $e');
+              }
+              List<Patient> newPatients = [];
+
+              if (data is List) {
+                for (var item in data) {
+                  if (item != null) newPatients.add(Patient.fromJson(item));
+                }
+              } else if (data is Map) {
+                data.forEach((key, value) {
+                  // Inject the RTDB key so Patient/Alarm models can persist changes back
+                  if (value is Map) {
+                    value['__id'] = key;
+                  }
+                  newPatients.add(Patient.fromJson(value));
+                });
+              }
+
+              patients = newPatients;
+              notifyListeners();
+              print("Firebase: Synced ${patients.length} patients.");
+            } catch (e) {
+              print("Firebase Sync Error: $e");
+            }
+          },
+          onError: (err) {
+            print('Firebase onValue listener error: $err');
+          },
+        );
+  }
+
+  // Manual fetch helper for debugging and one-off syncs
+  Future<void> fetchPatientsNow() async {
+    try {
+      final snap = await _dbRef.child('patients').get();
+      final data = snap.value;
+      print('Manual fetch snapshot type: ${data.runtimeType}');
+
+      List<Patient> newPatients = [];
+      if (data is List) {
+        for (var item in data) {
+          if (item != null) newPatients.add(Patient.fromJson(item));
         }
-
-        patients = newPatients;
-        notifyListeners();
-        print("Firebase: Synced ${patients.length} patients.");
-      } catch (e) {
-        print("Firebase Sync Error: $e");
+      } else if (data is Map) {
+        data.forEach((key, value) {
+          if (value is Map) value['__id'] = key;
+          newPatients.add(Patient.fromJson(value));
+        });
       }
-    });
+
+      patients = newPatients;
+      notifyListeners();
+      print('Manual fetch: Synced ${patients.length} patients.');
+    } catch (e) {
+      print('Manual fetch error: $e');
+    }
   }
 
   // --- MQTT CONNECTION ---
@@ -248,6 +411,9 @@ class AppState extends ChangeNotifier {
 
         // Trigger if times match (and seconds is 0 to avoid multi-trigger)
         if (a.hour == now.hour && a.minute == now.minute && now.second == 0) {
+          print(
+            'Alarm matched for patient ${p.name} slot ${p.slotNumber} at ${a.hour}:${a.minute}',
+          );
           _triggerAlarm(p, a);
           return;
         }
@@ -256,6 +422,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _triggerAlarm(Patient p, AlarmModel a) {
+    print('Triggering alarm UI for ${p.name}');
     activePatient = p;
     activeAlarm = a;
     isAlarmActive = true;
@@ -267,23 +434,66 @@ class AppState extends ChangeNotifier {
   void dispenseMedicine() {
     if (activePatient == null || activeAlarm == null) return;
 
-    // Send JSON Command to ESP32
-    final msg = jsonEncode({
-      'command': 'DISPENSE',
-      'slot': activePatient!.slotNumber,
-    });
+    // Capture current alarm/patient for persistence after MQTT
+    final Patient currentPatient = activePatient!;
+    final AlarmModel currentAlarm = activeAlarm!;
 
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(msg);
-    _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
+    // TODO: Send JSON Command to ESP32 (hardware integration later)
+    // final msg = jsonEncode({
+    //   'command': 'DISPENSE',
+    //   'slot': currentPatient.slotNumber,
+    // });
+    // final builder = MqttClientPayloadBuilder();
+    // builder.addString(msg);
+    // _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
+    print(
+      'Dispense medicine for patient ${currentPatient.name} slot ${currentPatient.slotNumber}',
+    );
 
-    // Clear Alarm State
-    activeAlarm!.isActive = false;
+    // Persist alarm inactive state back to Firebase if we have keys
+    try {
+      Patient? p;
+      for (var pt in patients) {
+        if (pt.slotNumber == currentPatient.slotNumber) {
+          p = pt;
+          break;
+        }
+      }
+      if (p != null && p.id != null) {
+        // Try to find alarm index to update; best-effort (may fail for map-shaped alarms)
+        final idx = p.alarms.indexWhere(
+          (al) =>
+              al.hour == currentAlarm.hour && al.minute == currentAlarm.minute,
+        );
+        if (idx != -1) {
+          final pid = p.id!;
+          _dbRef
+              .child('patients')
+              .child(pid)
+              .child('alarms')
+              .child('$idx')
+              .child('isActive')
+              .set(false)
+              .then((_) {
+                print(
+                  'Persisted alarm inactive for patient $pid alarm index $idx',
+                );
+              })
+              .catchError((e) {
+                print('Failed to persist alarm state: $e');
+              });
+        }
+      }
+    } catch (e) {
+      print('Error persisting alarm state: $e');
+    }
+
+    // Clear Alarm State locally
+    currentAlarm.isActive = false;
     isAlarmActive = false;
     activePatient = null;
     activeAlarm = null;
     notifyListeners();
-
     // Go back to clock
     navigatorKey.currentState?.popUntil(
       (route) => route.settings.name == '/clock',
@@ -291,11 +501,12 @@ class AppState extends ChangeNotifier {
   }
 
   void stopAlarm() {
-    // Optional: Send STOP to ESP32
-    final msg = jsonEncode({'command': 'STOP'});
-    final builder = MqttClientPayloadBuilder();
-    builder.addString(msg);
-    _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
+    // TODO: Send STOP to ESP32 (hardware integration later)
+    // final msg = jsonEncode({'command': 'STOP'});
+    // final builder = MqttClientPayloadBuilder();
+    // builder.addString(msg);
+    // _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
+    print('Alarm stopped by user');
 
     isAlarmActive = false;
     activePatient = null;
@@ -447,6 +658,16 @@ class ClockScreen extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (kDebugMode)
+                    Positioned(
+                      right: 24,
+                      bottom: 24,
+                      child: FloatingActionButton(
+                        mini: true,
+                        onPressed: () => state.fetchPatientsNow(),
+                        child: const Icon(Icons.sync),
+                      ),
+                    ),
                   Positioned(
                     left: 24,
                     top: 24,
