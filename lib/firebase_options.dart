@@ -41,53 +41,49 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyBrVfH_nVAqHt3vdSwpGXxHe4G--7v9py8',
-    appId: '1:154183473342:web:c181799238c63e2b70e6ef',
-    messagingSenderId: '154183473342',
-    projectId: 'pill-pal-40808',
-    authDomain: 'pill-pal-40808.firebaseapp.com',
-    databaseURL: 'https://pill-pal-40808-default-rtdb.firebaseio.com',
-    storageBucket: 'pill-pal-40808.firebasestorage.app',
-    measurementId: 'G-7LGFSM8GSP',
+    apiKey: 'AIzaSyB3CoUU1A9OEYrn3oFIxjhK3fGnksOZMEs',
+    appId: '1:220910735330:web:5550887ce75337b33a33bb',
+    messagingSenderId: '220910735330',
+    projectId: 'pill-pall-9b50f',
+    authDomain: 'pill-pall-9b50f.firebaseapp.com',
+    storageBucket: 'pill-pall-9b50f.firebasestorage.app',
+    measurementId: 'G-WRMS1YP0VZ',
   );
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyAhHljR1Y3spuD0lFG_VCRAkqqPN8VUMzs',
-    appId: '1:154183473342:android:9440fbd81eca163070e6ef',
-    messagingSenderId: '154183473342',
-    projectId: 'pill-pal-40808',
-    databaseURL: 'https://pill-pal-40808-default-rtdb.firebaseio.com',
-    storageBucket: 'pill-pal-40808.firebasestorage.app',
+    apiKey: 'AIzaSyChbt0O1HdAUlmqgmK51XtIf2aGd5ocxBg',
+    appId: '1:220910735330:android:c19674a27f80e6a53a33bb',
+    messagingSenderId: '220910735330',
+    projectId: 'pill-pall-9b50f',
+    storageBucket: 'pill-pall-9b50f.firebasestorage.app',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyBkyixh5TKSn3d6u1et5N-Ped4IhkEvw98',
-    appId: '1:154183473342:ios:f409a1bf723ed2b770e6ef',
-    messagingSenderId: '154183473342',
-    projectId: 'pill-pal-40808',
-    databaseURL: 'https://pill-pal-40808-default-rtdb.firebaseio.com',
-    storageBucket: 'pill-pal-40808.firebasestorage.app',
+    apiKey: 'AIzaSyAe2qAFVTOTPBZ1wpd_BBz-vpifE6s1EFI',
+    appId: '1:220910735330:ios:24e430ce945793c03a33bb',
+    messagingSenderId: '220910735330',
+    projectId: 'pill-pall-9b50f',
+    storageBucket: 'pill-pall-9b50f.firebasestorage.app',
     iosBundleId: 'com.example.newProj',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
-    apiKey: 'AIzaSyBkyixh5TKSn3d6u1et5N-Ped4IhkEvw98',
-    appId: '1:154183473342:ios:f409a1bf723ed2b770e6ef',
-    messagingSenderId: '154183473342',
-    projectId: 'pill-pal-40808',
-    databaseURL: 'https://pill-pal-40808-default-rtdb.firebaseio.com',
-    storageBucket: 'pill-pal-40808.firebasestorage.app',
+    apiKey: 'AIzaSyAe2qAFVTOTPBZ1wpd_BBz-vpifE6s1EFI',
+    appId: '1:220910735330:ios:24e430ce945793c03a33bb',
+    messagingSenderId: '220910735330',
+    projectId: 'pill-pall-9b50f',
+    storageBucket: 'pill-pall-9b50f.firebasestorage.app',
     iosBundleId: 'com.example.newProj',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(
-    apiKey: 'AIzaSyBrVfH_nVAqHt3vdSwpGXxHe4G--7v9py8',
-    appId: '1:154183473342:web:8f2820cf4b3af9a270e6ef',
-    messagingSenderId: '154183473342',
-    projectId: 'pill-pal-40808',
-    authDomain: 'pill-pal-40808.firebaseapp.com',
-    databaseURL: 'https://pill-pal-40808-default-rtdb.firebaseio.com',
-    storageBucket: 'pill-pal-40808.firebasestorage.app',
-    measurementId: 'G-Q20BG9FQ0N',
+    apiKey: 'AIzaSyB3CoUU1A9OEYrn3oFIxjhK3fGnksOZMEs',
+    appId: '1:220910735330:web:0736b39b6e819e073a33bb',
+    messagingSenderId: '220910735330',
+    projectId: 'pill-pall-9b50f',
+    authDomain: 'pill-pall-9b50f.firebaseapp.com',
+    storageBucket: 'pill-pall-9b50f.firebasestorage.app',
+    measurementId: 'G-ZSME9J5Y90',
   );
+
 }
