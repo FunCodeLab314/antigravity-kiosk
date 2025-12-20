@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:fl_chart/fl_chart.dart'; // Added Chart
 import 'services.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -74,14 +75,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // --- ADD / EDIT DIALOG (UPDATED: Multiple Alarms) ---
+  // --- ADD / EDIT DIALOG (UPDATED: Success Popup & Stats) ---
   void _showPatientDialog({
     Patient? patientToEdit,
     required List<Patient> existingPatients,
   }) {
     final bool isEditing = patientToEdit != null;
 
-    // Core Controllers
     final nameCtrl = TextEditingController(
       text: isEditing ? patientToEdit.name : '',
     );
@@ -93,7 +93,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
     String gender = isEditing ? patientToEdit.gender : "Male";
 
-    // --- TEMPORARY ALARM DATA MANAGEMENT ---
     List<Map<String, dynamic>> tempAlarms = [];
 
     if (isEditing) {
@@ -115,7 +114,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setState) {
-            // --- Helper: Add New Alarm ---
+            bool isSaving = false; // Prevent Double Click
+
             void addAlarm() {
               if (tempAlarms.length < 3) {
                 setState(() {
@@ -128,7 +128,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               }
             }
 
-            // --- Helper: Add Med to Alarm ---
             void addMedication(int alarmIndex) {
               if (tempAlarms[alarmIndex]['meds'].length < 5) {
                 TextEditingController medInput = TextEditingController();
@@ -187,7 +186,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // --- PERSONAL INFO ---
                         const Text(
                           "Personal Info",
                           style: TextStyle(
@@ -259,7 +257,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                         const Divider(height: 30),
 
-                        // --- ALARMS HEADER ---
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
@@ -282,7 +279,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ],
                         ),
 
-                        // --- ALARMS LIST ---
                         if (tempAlarms.isEmpty)
                           const Padding(
                             padding: EdgeInsets.all(10),
@@ -308,7 +304,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  // Time Row
                                   Row(
                                     children: [
                                       const Icon(
@@ -364,7 +359,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     ],
                                   ),
                                   const Divider(),
-                                  // Meds List
                                   Wrap(
                                     spacing: 6,
                                     children: [
@@ -417,9 +411,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     backgroundColor: const Color(0xFF1565C0),
                     foregroundColor: Colors.white,
                   ),
-                  onPressed: () async {
+                  onPressed: isSaving 
+                      ? null 
+                      : () async {
                     if (formKey.currentState!.validate()) {
-                      // Conversion Logic: UI Maps -> Services Models
+                      setState(() => isSaving = true); // Lock button
                       List<AlarmModel> finalAlarms = tempAlarms.map((a) {
                         return AlarmModel(
                           timeOfDay: a['time'],
@@ -440,14 +436,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             gender,
                             finalAlarms,
                           );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text("Updated successfully"),
-                                backgroundColor: Colors.blue,
-                              ),
-                            );
-                          }
                         } else {
                           await _db.addPatient(
                             nameCtrl.text,
@@ -456,17 +444,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             gender,
                             finalAlarms,
                           );
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text("Added successfully"),
-                                backgroundColor: Colors.green,
-                              ),
-                            );
-                          }
                         }
-                        if (context.mounted) Navigator.pop(ctx);
+                        
+                        if (context.mounted) {
+                          Navigator.pop(ctx); // Close Form
+                          
+                          // Show Success Popup (Only for Add, or both)
+                          // Prompt asked for "added" specifically, but good for both
+                          showDialog(
+                            context: context,
+                            builder: (context) => AlertDialog(
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              title: Row(children: [
+                                const Icon(Icons.check_circle, color: Colors.green),
+                                const SizedBox(width: 10),
+                                Text(isEditing ? "Updated" : "Success")
+                              ]),
+                              content: Text(isEditing 
+                                ? "Patient details updated successfully."
+                                : "Patient added successfully!"),
+                              actions: [
+                                TextButton(
+                                  onPressed: ()=>Navigator.pop(context), 
+                                  child: const Text("OK")
+                                )
+                              ],
+                            )
+                          );
+                        }
                       } catch (e) {
+                        setState(() => isSaving = false);
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
@@ -478,7 +485,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       }
                     }
                   },
-                  child: Text(isEditing ? "Update" : "Save"),
+                  child: isSaving 
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)) 
+                    : Text(isEditing ? "Update" : "Save"),
                 ),
               ],
             );
@@ -488,7 +497,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // --- FIXED NAV BUTTON (Mobile Optimized) ---
   Widget _buildNavButton(IconData icon, String label, VoidCallback onTap) {
     return Expanded(
       child: InkWell(
@@ -510,6 +518,142 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  // --- NEW: Stats Section (Graph + Card) ---
+  Widget _buildStatsSection(List<Patient> patients) {
+    int totalPatients = patients.length;
+    int skippedCount = 0;
+    int takenCount = 0;
+    int pendingCount = 0;
+
+    for (var p in patients) {
+      for (var a in p.alarms) {
+        for (var m in a.medications) {
+          if (m.status == 'skipped') skippedCount++;
+          else if (m.status == 'taken') takenCount++;
+          else pendingCount++;
+        }
+      }
+    }
+
+    int totalMeds = skippedCount + takenCount + pendingCount;
+    // Avoid division by zero for pie chart
+    if (totalMeds == 0) totalMeds = 1; 
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      child: Column(
+        children: [
+          // Total Patient Card
+          Card(
+            color: const Color(0xFF1565C0),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      shape: BoxShape.circle
+                    ),
+                    child: const Icon(Icons.people_alt, color: Colors.white, size: 28),
+                  ),
+                  const SizedBox(width: 16),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        "Total Patients",
+                        style: TextStyle(color: Colors.white70, fontSize: 14),
+                      ),
+                      Text(
+                        "$totalPatients",
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  )
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Graph Card
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text("Medication Status", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    height: 150,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: PieChart(
+                            PieChartData(
+                              sectionsSpace: 0,
+                              centerSpaceRadius: 30,
+                              sections: [
+                                PieChartSectionData(
+                                  value: takenCount.toDouble(),
+                                  title: "",
+                                  color: Colors.green,
+                                  radius: 25,
+                                ),
+                                PieChartSectionData(
+                                  value: skippedCount.toDouble(),
+                                  title: "",
+                                  color: Colors.orange,
+                                  radius: 25,
+                                ),
+                                PieChartSectionData(
+                                  value: pendingCount.toDouble(),
+                                  title: "",
+                                  color: Colors.grey[300],
+                                  radius: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                             _buildLegend(Colors.green, "Taken ($takenCount)"),
+                             const SizedBox(height: 4),
+                             _buildLegend(Colors.orange, "Skipped ($skippedCount)"),
+                             const SizedBox(height: 4),
+                             _buildLegend(Colors.grey[300]!, "Pending ($pendingCount)"),
+                          ],
+                        )
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLegend(Color color, String text) {
+    return Row(
+      children: [
+        Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        Text(text, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+      ],
     );
   }
 
@@ -536,84 +680,88 @@ class _DashboardScreenState extends State<DashboardScreen> {
             return const Center(child: CircularProgressIndicator());
           final patients = snapshot.data!;
 
-          if (patients.isEmpty) {
-            return const Center(child: Text("No patients yet. Tap + to add."));
-          }
-
           return Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 800),
-              child: ListView.builder(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
-                itemCount: patients.length,
-                itemBuilder: (context, index) {
-                  final p = patients[index];
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.blue.withOpacity(0.05),
-                          blurRadius: 10,
-                        ),
-                      ],
-                    ),
-                    child: Card(
-                      margin: EdgeInsets.zero,
-                      child: InkWell(
-                        onTap: () => _showPatientDialog(
-                          patientToEdit: p,
-                          existingPatients: patients,
-                        ),
+              child: ListView( // Changed from ListView.builder to ListView to include header
+                padding: const EdgeInsets.fromLTRB(20, 10, 20, 100),
+                children: [
+                  // --- Added Stats Section Here ---
+                  _buildStatsSection(patients), 
+                  const SizedBox(height: 10),
+                  
+                  if (patients.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 40),
+                      child: Center(child: Text("No patients yet. Tap + to add.")),
+                    )
+                  else
+                    ...patients.map((p) => Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(16),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.all(16),
-                          leading: CircleAvatar(
-                            radius: 28,
-                            backgroundColor: const Color(0xFFE3F2FD),
-                            child: Text(
-                              p.slotNumber,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.blue.withOpacity(0.05),
+                            blurRadius: 10,
+                          ),
+                        ],
+                      ),
+                      child: Card(
+                        margin: EdgeInsets.zero,
+                        child: InkWell(
+                          onTap: () => _showPatientDialog(
+                            patientToEdit: p,
+                            existingPatients: patients,
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          child: ListTile(
+                            contentPadding: const EdgeInsets.all(16),
+                            leading: CircleAvatar(
+                              radius: 28,
+                              backgroundColor: const Color(0xFFE3F2FD),
+                              child: Text(
+                                p.slotNumber,
+                                style: const TextStyle(
+                                  color: Color(0xFF1565C0),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 20,
+                                ),
+                              ),
+                            ),
+                            title: Text(
+                              p.name,
                               style: const TextStyle(
-                                color: Color(0xFF1565C0),
                                 fontWeight: FontWeight.bold,
-                                fontSize: 20,
+                                fontSize: 18,
                               ),
                             ),
-                          ),
-                          title: Text(
-                            p.name,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 18,
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    _buildTag("${p.age} yrs"),
+                                    _buildTag(p.gender),
+                                    _buildTag("${p.alarms.length} Alarms"),
+                                  ],
+                                ),
+                              ],
                             ),
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const SizedBox(height: 6),
-                              Wrap(
-                                spacing: 8,
-                                children: [
-                                  _buildTag("${p.age} yrs"),
-                                  _buildTag(p.gender),
-                                  _buildTag("${p.alarms.length} Alarms"),
-                                ],
+                            trailing: IconButton(
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: Colors.redAccent,
                               ),
-                            ],
-                          ),
-                          trailing: IconButton(
-                            icon: const Icon(
-                              Icons.delete_outline,
-                              color: Colors.redAccent,
+                              onPressed: () => _confirmDelete(p.id!, p.name),
                             ),
-                            onPressed: () => _confirmDelete(p.id!, p.name),
                           ),
                         ),
                       ),
-                    ),
-                  );
-                },
+                    )).toList(),
+                ],
               ),
             ),
           );
@@ -631,7 +779,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           );
         },
       ),
-      // --- FIXED NAVBAR WITH PROPER HEIGHT ---
       bottomNavigationBar: BottomAppBar(
         shape: const CircularNotchedRectangle(),
         notchMargin: 8,
@@ -652,7 +799,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               final patients = await _db.getPatients().first;
               if (context.mounted) _db.generateReport(patients, context);
             }),
-            const SizedBox(width: 80), // Space for FAB
+            const SizedBox(width: 80),
             _buildNavButton(
               Icons.devices,
               "Kiosk",

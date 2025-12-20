@@ -16,6 +16,7 @@ import 'firebase_options.dart';
 import 'services.dart';
 import 'auth_screens.dart';
 import 'dashboard.dart';
+import 'welcome_screen.dart'; // Import the new screen
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -82,7 +83,8 @@ class PillPalApp extends StatelessWidget {
             if (snapshot.hasData) {
               return const DashboardScreen();
             }
-            return const AuthScreen();
+            // Changed: Show WelcomeScreen first instead of direct AuthScreen
+            return const WelcomeScreen(); 
           },
         ),
         routes: {
@@ -164,7 +166,7 @@ class KioskState extends ChangeNotifier {
     navigatorKey.currentState?.pushNamed('/alarm');
   }
 
-  void dispense(BuildContext context) {
+  void dispense(BuildContext context) async {
     // 1. Check if MQTT is connected
     if (mqttStatus != "Connected") {
       showDialog(
@@ -186,7 +188,7 @@ class KioskState extends ChangeNotifier {
     }
 
     // 2. Proceed if connected
-    if (activePatient != null) {
+    if (activePatient != null && activeAlarm != null) {
       final msg = jsonEncode({
         'command': 'DISPENSE',
         'slot': activePatient!.slotNumber,
@@ -194,6 +196,13 @@ class KioskState extends ChangeNotifier {
       final builder = MqttClientPayloadBuilder();
       builder.addString(msg);
       _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
+
+      // --- ADDED: Mark as Taken in Database for Graph ---
+      await _db.markTaken(
+        activePatient!.id!,
+        activeAlarm!.id!,
+        activeAlarm!.medications,
+      );
     }
     _close();
   }

@@ -240,7 +240,28 @@ class FirestoreService {
     }
   }
 
-  // --- 6. PDF Generation (UPDATED FOR 5 MEDS) ---
+  // --- 6. Mark Taken (NEW for Graph) ---
+  Future<void> markTaken(
+    String patientId,
+    String alarmId,
+    List<Medication> meds,
+  ) async {
+    final now = DateTime.now().toIso8601String();
+    for (var med in meds) {
+      if (med.id != null) {
+        await _db
+            .collection('patients')
+            .doc(patientId)
+            .collection('alarms')
+            .doc(alarmId)
+            .collection('medications')
+            .doc(med.id)
+            .update({'status': 'taken', 'lastTakenAt': now});
+      }
+    }
+  }
+
+  // --- 7. PDF Generation ---
   Future<void> generateReport(
     List<Patient> patients,
     BuildContext context,
@@ -258,12 +279,12 @@ class FirestoreService {
       pw.Alignment alignment = pw.Alignment.centerLeft,
     }) {
       return pw.Container(
-        padding: const pw.EdgeInsets.all(4), // Reduced padding slightly
+        padding: const pw.EdgeInsets.all(4),
         alignment: alignment,
         child: pw.Text(
           text,
           style: pw.TextStyle(
-            fontSize: isHeader ? 9 : 8, // Smaller font to fit 5 meds
+            fontSize: isHeader ? 9 : 8,
             fontWeight: isHeader ? pw.FontWeight.bold : null,
             color: PdfColors.black,
           ),
@@ -325,8 +346,8 @@ class FirestoreService {
               _buildCell("Meds 1", isHeader: true),
               _buildCell("Meds 2", isHeader: true),
               _buildCell("Meds 3", isHeader: true),
-              _buildCell("Meds 4", isHeader: true), // New Column
-              _buildCell("Meds 5", isHeader: true), // New Column
+              _buildCell("Meds 4", isHeader: true),
+              _buildCell("Meds 5", isHeader: true),
               _buildCell("Last Status", isHeader: true),
             ],
           ),
@@ -343,13 +364,14 @@ class FirestoreService {
             if (alarm.medications.length > 3) m4 = alarm.medications[3].name;
             if (alarm.medications.length > 4) m5 = alarm.medications[4].name;
 
-            // Check status of first med (representative of the alarm group)
+            // Check status of first med
             final firstMed = alarm.medications[0];
             if (firstMed.lastActionAt != null) {
               lastStatus = DateFormat(
                 'MM/dd HH:mm',
               ).format(firstMed.lastActionAt!);
               if (firstMed.status == 'skipped') lastStatus += " (Skip)";
+              if (firstMed.status == 'taken') lastStatus += " (Taken)";
             }
           }
 
@@ -372,13 +394,13 @@ class FirestoreService {
           pw.Table(
             border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.5),
             columnWidths: {
-              0: const pw.FlexColumnWidth(1.2), // Time
-              1: const pw.FlexColumnWidth(2), // Med 1
-              2: const pw.FlexColumnWidth(2), // Med 2
-              3: const pw.FlexColumnWidth(2), // Med 3
-              4: const pw.FlexColumnWidth(2), // Med 4
-              5: const pw.FlexColumnWidth(2), // Med 5
-              6: const pw.FlexColumnWidth(2.5), // Status
+              0: const pw.FlexColumnWidth(1.2),
+              1: const pw.FlexColumnWidth(2),
+              2: const pw.FlexColumnWidth(2),
+              3: const pw.FlexColumnWidth(2),
+              4: const pw.FlexColumnWidth(2),
+              5: const pw.FlexColumnWidth(2),
+              6: const pw.FlexColumnWidth(2.5),
             },
             children: alarmTableRows,
           ),
