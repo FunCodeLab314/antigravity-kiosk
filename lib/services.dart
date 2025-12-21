@@ -24,10 +24,9 @@ class Medication {
 
   factory Medication.fromMap(Map<String, dynamic> data, String id) {
     DateTime? actionTime;
-    if (data['lastActionAt'] != null) { // Unified timestamp field
+    if (data['lastActionAt'] != null) {
       actionTime = (data['lastActionAt'] as Timestamp).toDate();
     } 
-    // Fallback for older data
     else if (data['lastSkippedAt'] != null) {
       actionTime = DateTime.tryParse(data['lastSkippedAt'].toString());
     } else if (data['lastTakenAt'] != null) {
@@ -222,43 +221,67 @@ class FirestoreService {
     await _db.collection('patients').doc(id).delete();
   }
 
-  // --- 5. Record Action (History + Status Update) ---
+  // --- 5. Record Action (History + Status Update) - FIXED ---
   Future<void> _recordAction(
     String patientId,
     String alarmId,
     List<Medication> meds,
     String status,
   ) async {
-    final now = DateTime.now();
-    
-    // 1. Update Status in current Alarm (for Dashboard Graph)
-    for (var med in meds) {
-      if (med.id != null) {
-        await _db
-            .collection('patients')
-            .doc(patientId)
-            .collection('alarms')
-            .doc(alarmId)
-            .collection('medications')
-            .doc(med.id)
-            .update({
-              'status': status,
-              'lastActionAt': FieldValue.serverTimestamp(), // Use server timestamp
-            });
+    try {
+      final now = DateTime.now();
+      final dateStr = DateFormat('yyyy-MM-dd').format(now);
+      final timeStr = DateFormat('HH:mm').format(now);
+      
+      print("🔥 Recording action: Patient=$patientId, Alarm=$alarmId, Status=$status");
+      print("🔥 Medications: ${meds.map((m) => '${m.name}(id:${m.id})').join(', ')}");
+      
+      // 1. Update Status in Alarm's Medication Subcollection
+      final alarmRef = _db
+          .collection('patients')
+          .doc(patientId)
+          .collection('alarms')
+          .doc(alarmId);
+      
+      final medsSnapshot = await alarmRef.collection('medications').get();
+      
+      for (var medDoc in medsSnapshot.docs) {
+        final medData = medDoc.data();
+        final medName = medData['name'];
+        
+        // Check if this medication is in the list
+        if (meds.any((m) => m.name == medName)) {
+          await medDoc.reference.update({
+            'status': status,
+            'lastActionAt': FieldValue.serverTimestamp(),
+          });
+          print("✅ Updated medication status: $medName -> $status");
+        }
       }
-    }
 
-    // 2. Add to History Collection (For Daily Reports)
-    // Structure: patients/{id}/history/{auto_id}
-    final historyRef = _db.collection('patients').doc(patientId).collection('history');
-    
-    for (var med in meds) {
-      await historyRef.add({
-        'medicationName': med.name,
-        'status': status, // 'taken' or 'skipped'
-        'actionTime': FieldValue.serverTimestamp(),
-        'date': DateFormat('yyyy-MM-dd').format(now), // For easy filtering
-      });
+      // 2. Add to History Collection (for Reports)
+      final historyRef = _db
+          .collection('patients')
+          .doc(patientId)
+          .collection('history');
+      
+      for (var med in meds) {
+        await historyRef.add({
+          'medicationName': med.name,
+          'status': status, // 'taken' or 'skipped'
+          'actionTime': FieldValue.serverTimestamp(),
+          'date': dateStr, // For filtering by date
+          'time': timeStr, // Human-readable time
+          'alarmId': alarmId,
+        });
+        print("✅ Added to history: ${med.name} -> $status at $timeStr");
+      }
+      
+      print("🎉 Action recorded successfully!");
+      
+    } catch (e) {
+      print("❌ Error recording action: $e");
+      rethrow;
     }
   }
 
@@ -281,53 +304,41 @@ class FirestoreService {
     final String displayDate = DateFormat('MMMM d, yyyy').format(selectedDate);
     final String fileName = 'PillPal_Report_$dateStr.pdf';
 
-    pw.Widget _buildCell(String text, {bool isHeader = false}) {
-      return pw.Padding(
-        padding: const pw.EdgeInsets.all(5),
-        child: pw.Text(
-          text,
-          style: pw.TextStyle(
-            fontSize: isHeader ? 10 : 9,
-            fontWeight: isHeader ? pw.FontWeight.bold : null,
-          ),
-        ),
-      );
-    }
-
     try {
       final pdf = pw.Document();
       
-      // We need to fetch history data for each patient for the selected date
+      // Fetch history data for each patient for the selected date
       List<List<String>> historyRows = [];
 
       for (var p in patients) {
-        // Query History for this patient & date
         final historySnap = await _db
             .collection('patients')
             .doc(p.id)
             .collection('history')
             .where('date', isEqualTo: dateStr)
+            .orderBy('actionTime', descending: false)
             .get();
 
         if (historySnap.docs.isNotEmpty) {
           for (var doc in historySnap.docs) {
             final data = doc.data();
-            String time = "Unknown";
-            if (data['actionTime'] != null) {
+            String time = data['time'] ?? "Unknown";
+            
+            // Fallback if 'time' field doesn't exist
+            if (time == "Unknown" && data['actionTime'] != null) {
               time = DateFormat('HH:mm').format((data['actionTime'] as Timestamp).toDate());
             }
+            
+            String statusDisplay = (data['status'] ?? 'UNKNOWN').toString().toUpperCase();
             
             historyRows.add([
               p.name,
               p.slotNumber,
               data['medicationName'] ?? '-',
               time,
-              data['status'].toString().toUpperCase(),
+              statusDisplay,
             ]);
           }
-        } else {
-           // If no history, check if they had alarms pending (Optional)
-           // For now, just show they had no actions recorded
         }
       }
 
@@ -341,7 +352,14 @@ class FirestoreService {
                 child: pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
-                    pw.Text('PillPal Daily Report', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColor.fromHex('1565C0'))),
+                    pw.Text(
+                      'PillPal Daily Report',
+                      style: pw.TextStyle(
+                        fontSize: 24,
+                        fontWeight: pw.FontWeight.bold,
+                        color: PdfColor.fromHex('1565C0')
+                      )
+                    ),
                     pw.Text(displayDate, style: const pw.TextStyle(fontSize: 14)),
                   ]
                 )
@@ -349,26 +367,53 @@ class FirestoreService {
               pw.SizedBox(height: 20),
               
               if (historyRows.isEmpty)
-                pw.Center(child: pw.Text("No medication activity recorded for this date."))
+                pw.Center(
+                  child: pw.Padding(
+                    padding: const pw.EdgeInsets.all(40),
+                    child: pw.Text(
+                      "No medication activity recorded for this date.",
+                      style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey600)
+                    )
+                  )
+                )
               else
                 pw.Table.fromTextArray(
                   headers: ['Patient Name', 'Slot', 'Medication', 'Time', 'Status'],
                   data: historyRows,
                   border: pw.TableBorder.all(color: PdfColors.grey300),
-                  headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
-                  headerDecoration: pw.BoxDecoration(color: PdfColor.fromHex('1565C0')),
+                  headerStyle: pw.TextStyle(
+                    fontWeight: pw.FontWeight.bold,
+                    color: PdfColors.white,
+                    fontSize: 11
+                  ),
+                  headerDecoration: pw.BoxDecoration(
+                    color: PdfColor.fromHex('1565C0')
+                  ),
                   cellAlignment: pw.Alignment.centerLeft,
                   cellAlignments: {
                     1: pw.Alignment.center,
                     3: pw.Alignment.center,
                     4: pw.Alignment.center,
-                  }
+                  },
+                  cellStyle: const pw.TextStyle(fontSize: 10),
                 ),
                 
               pw.SizedBox(height: 20),
               pw.Divider(),
               pw.SizedBox(height: 10),
-              pw.Text("Total Patients Monitored: ${patients.length}", style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)),
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    "Total Patients Monitored: ${patients.length}",
+                    style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)
+                  ),
+                  pw.Text(
+                    "Total Records: ${historyRows.length}",
+                    style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)
+                  ),
+                ]
+              ),
             ];
           },
         ),
@@ -388,7 +433,9 @@ class FirestoreService {
       }
       
       final file = File('$path/$fileName');
-      if (!await Directory(path).exists()) await Directory(path).create(recursive: true);
+      if (!await Directory(path).exists()) {
+        await Directory(path).create(recursive: true);
+      }
       await file.writeAsBytes(await pdf.save());
 
       if (context.mounted) {
@@ -407,7 +454,12 @@ class FirestoreService {
     } catch (e) {
       print("PDF Error: $e");
       if (context.mounted) {
-        scaffoldMessenger.showSnackBar(SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+        scaffoldMessenger.showSnackBar(
+          SnackBar(
+            content: Text("Error: $e"),
+            backgroundColor: Colors.red
+          )
+        );
       }
     }
   }
