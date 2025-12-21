@@ -12,7 +12,7 @@ import 'package:intl/intl.dart';
 class Medication {
   String? id;
   String name;
-  String status;
+  String status; // 'pending', 'taken', 'skipped'
   DateTime? lastActionAt;
 
   Medication({
@@ -24,10 +24,14 @@ class Medication {
 
   factory Medication.fromMap(Map<String, dynamic> data, String id) {
     DateTime? actionTime;
-    if (data['lastSkippedAt'] != null) {
-      actionTime = DateTime.tryParse(data['lastSkippedAt']);
+    if (data['lastActionAt'] != null) { // Unified timestamp field
+      actionTime = (data['lastActionAt'] as Timestamp).toDate();
+    } 
+    // Fallback for older data
+    else if (data['lastSkippedAt'] != null) {
+      actionTime = DateTime.tryParse(data['lastSkippedAt'].toString());
     } else if (data['lastTakenAt'] != null) {
-      actionTime = DateTime.tryParse(data['lastTakenAt']);
+      actionTime = DateTime.tryParse(data['lastTakenAt'].toString());
     }
 
     return Medication(
@@ -37,7 +41,6 @@ class Medication {
       lastActionAt: actionTime,
     );
   }
-  Map<String, dynamic> toJson() => {'name': name, 'status': status};
 }
 
 class AlarmModel {
@@ -150,7 +153,6 @@ class FirestoreService {
       'age': age,
       'slotNumber': slot,
       'gender': gender,
-      'lastUpdatedBy': 'KioskAdmin',
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
@@ -190,6 +192,7 @@ class FirestoreService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
+    // Simple strategy: delete old alarms and re-add new ones
     final oldAlarms = await pRef.collection('alarms').get();
     for (var doc in oldAlarms.docs) {
       final meds = await doc.reference.collection('medications').get();
@@ -219,13 +222,16 @@ class FirestoreService {
     await _db.collection('patients').doc(id).delete();
   }
 
-  // --- 5. Mark Skipped ---
-  Future<void> markSkipped(
+  // --- 5. Record Action (History + Status Update) ---
+  Future<void> _recordAction(
     String patientId,
     String alarmId,
     List<Medication> meds,
+    String status,
   ) async {
-    final now = DateTime.now().toIso8601String();
+    final now = DateTime.now();
+    
+    // 1. Update Status in current Alarm (for Dashboard Graph)
     for (var med in meds) {
       if (med.id != null) {
         await _db
@@ -235,58 +241,54 @@ class FirestoreService {
             .doc(alarmId)
             .collection('medications')
             .doc(med.id)
-            .update({'status': 'skipped', 'lastSkippedAt': now});
+            .update({
+              'status': status,
+              'lastActionAt': FieldValue.serverTimestamp(), // Use server timestamp
+            });
       }
     }
-  }
 
-  // --- 6. Mark Taken (NEW for Graph) ---
-  Future<void> markTaken(
-    String patientId,
-    String alarmId,
-    List<Medication> meds,
-  ) async {
-    final now = DateTime.now().toIso8601String();
+    // 2. Add to History Collection (For Daily Reports)
+    // Structure: patients/{id}/history/{auto_id}
+    final historyRef = _db.collection('patients').doc(patientId).collection('history');
+    
     for (var med in meds) {
-      if (med.id != null) {
-        await _db
-            .collection('patients')
-            .doc(patientId)
-            .collection('alarms')
-            .doc(alarmId)
-            .collection('medications')
-            .doc(med.id)
-            .update({'status': 'taken', 'lastTakenAt': now});
-      }
+      await historyRef.add({
+        'medicationName': med.name,
+        'status': status, // 'taken' or 'skipped'
+        'actionTime': FieldValue.serverTimestamp(),
+        'date': DateFormat('yyyy-MM-dd').format(now), // For easy filtering
+      });
     }
   }
 
-  // --- 7. PDF Generation ---
+  Future<void> markSkipped(String pId, String aId, List<Medication> meds) async {
+    await _recordAction(pId, aId, meds, 'skipped');
+  }
+
+  Future<void> markTaken(String pId, String aId, List<Medication> meds) async {
+    await _recordAction(pId, aId, meds, 'taken');
+  }
+
+  // --- 6. PDF Generation (Updated for Date Range) ---
   Future<void> generateReport(
     List<Patient> patients,
     BuildContext context,
+    DateTime selectedDate,
   ) async {
     final scaffoldMessenger = ScaffoldMessenger.of(context);
+    final String dateStr = DateFormat('yyyy-MM-dd').format(selectedDate);
+    final String displayDate = DateFormat('MMMM d, yyyy').format(selectedDate);
+    final String fileName = 'PillPal_Report_$dateStr.pdf';
 
-    final now = DateTime.now();
-    final String dateStr = DateFormat('yyyy-MM-dd').format(now);
-    final String displayDate = DateFormat('MMMM d, yyyy').format(now);
-    final String fileName = 'PillPal_Report_${dateStr}_to_$dateStr.pdf';
-
-    pw.Widget _buildCell(
-      String text, {
-      bool isHeader = false,
-      pw.Alignment alignment = pw.Alignment.centerLeft,
-    }) {
-      return pw.Container(
-        padding: const pw.EdgeInsets.all(4),
-        alignment: alignment,
+    pw.Widget _buildCell(String text, {bool isHeader = false}) {
+      return pw.Padding(
+        padding: const pw.EdgeInsets.all(5),
         child: pw.Text(
           text,
           style: pw.TextStyle(
-            fontSize: isHeader ? 9 : 8,
+            fontSize: isHeader ? 10 : 9,
             fontWeight: isHeader ? pw.FontWeight.bold : null,
-            color: PdfColors.black,
           ),
         ),
       );
@@ -294,117 +296,39 @@ class FirestoreService {
 
     try {
       final pdf = pw.Document();
-
-      final summaryHeaders = ['Slot', 'Name', 'Age', 'Gender', 'Alarms'];
-      final summaryData = patients
-          .map(
-            (p) => [
-              p.slotNumber,
-              p.name,
-              p.age.toString(),
-              p.gender,
-              p.alarms.length.toString(),
-            ],
-          )
-          .toList();
-
-      List<pw.Widget> detailedWidgets = [];
+      
+      // We need to fetch history data for each patient for the selected date
+      List<List<String>> historyRows = [];
 
       for (var p in patients) {
-        detailedWidgets.add(
-          pw.Padding(
-            padding: const pw.EdgeInsets.only(top: 15, bottom: 5),
-            child: pw.Text(
-              "Slot ${p.slotNumber}: ${p.name} - Detailed Alarms",
-              style: pw.TextStyle(
-                fontSize: 14,
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColor.fromHex('6A1B9A'),
-              ),
-            ),
-          ),
-        );
+        // Query History for this patient & date
+        final historySnap = await _db
+            .collection('patients')
+            .doc(p.id)
+            .collection('history')
+            .where('date', isEqualTo: dateStr)
+            .get();
 
-        if (p.alarms.isEmpty) {
-          detailedWidgets.add(
-            pw.Padding(
-              padding: const pw.EdgeInsets.only(left: 10, bottom: 10),
-              child: pw.Text(
-                "No alarms set for this patient.",
-                style: pw.TextStyle(fontStyle: pw.FontStyle.italic),
-              ),
-            ),
-          );
-          continue;
-        }
-
-        final alarmTableRows = <pw.TableRow>[
-          pw.TableRow(
-            decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-            children: [
-              _buildCell("Time", isHeader: true),
-              _buildCell("Meds 1", isHeader: true),
-              _buildCell("Meds 2", isHeader: true),
-              _buildCell("Meds 3", isHeader: true),
-              _buildCell("Meds 4", isHeader: true),
-              _buildCell("Meds 5", isHeader: true),
-              _buildCell("Last Status", isHeader: true),
-            ],
-          ),
-        ];
-
-        for (var alarm in p.alarms) {
-          String m1 = "—", m2 = "—", m3 = "—", m4 = "—", m5 = "—";
-          String lastStatus = "Pending";
-
-          if (alarm.medications.isNotEmpty) {
-            if (alarm.medications.length > 0) m1 = alarm.medications[0].name;
-            if (alarm.medications.length > 1) m2 = alarm.medications[1].name;
-            if (alarm.medications.length > 2) m3 = alarm.medications[2].name;
-            if (alarm.medications.length > 3) m4 = alarm.medications[3].name;
-            if (alarm.medications.length > 4) m5 = alarm.medications[4].name;
-
-            // Check status of first med
-            final firstMed = alarm.medications[0];
-            if (firstMed.lastActionAt != null) {
-              lastStatus = DateFormat(
-                'MM/dd HH:mm',
-              ).format(firstMed.lastActionAt!);
-              if (firstMed.status == 'skipped') lastStatus += " (Skip)";
-              if (firstMed.status == 'taken') lastStatus += " (Taken)";
+        if (historySnap.docs.isNotEmpty) {
+          for (var doc in historySnap.docs) {
+            final data = doc.data();
+            String time = "Unknown";
+            if (data['actionTime'] != null) {
+              time = DateFormat('HH:mm').format((data['actionTime'] as Timestamp).toDate());
             }
+            
+            historyRows.add([
+              p.name,
+              p.slotNumber,
+              data['medicationName'] ?? '-',
+              time,
+              data['status'].toString().toUpperCase(),
+            ]);
           }
-
-          alarmTableRows.add(
-            pw.TableRow(
-              children: [
-                _buildCell(alarm.timeOfDay),
-                _buildCell(m1),
-                _buildCell(m2),
-                _buildCell(m3),
-                _buildCell(m4),
-                _buildCell(m5),
-                _buildCell(lastStatus),
-              ],
-            ),
-          );
+        } else {
+           // If no history, check if they had alarms pending (Optional)
+           // For now, just show they had no actions recorded
         }
-
-        detailedWidgets.add(
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.5),
-            columnWidths: {
-              0: const pw.FlexColumnWidth(1.2),
-              1: const pw.FlexColumnWidth(2),
-              2: const pw.FlexColumnWidth(2),
-              3: const pw.FlexColumnWidth(2),
-              4: const pw.FlexColumnWidth(2),
-              5: const pw.FlexColumnWidth(2),
-              6: const pw.FlexColumnWidth(2.5),
-            },
-            children: alarmTableRows,
-          ),
-        );
       }
 
       pdf.addPage(
@@ -414,100 +338,64 @@ class FirestoreService {
             return [
               pw.Header(
                 level: 0,
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                child: pw.Row(
+                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                   children: [
-                    pw.Text(
-                      'PillPal Patient Report',
-                      style: pw.TextStyle(
-                        fontSize: 24,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColor.fromHex('6A1B9A'),
-                      ),
-                    ),
-                    pw.SizedBox(height: 4),
-                    pw.Text(
-                      'Report generated: $displayDate',
-                      style: const pw.TextStyle(fontSize: 12),
-                    ),
-                  ],
-                ),
+                    pw.Text('PillPal Daily Report', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColor.fromHex('1565C0'))),
+                    pw.Text(displayDate, style: const pw.TextStyle(fontSize: 14)),
+                  ]
+                )
               ),
               pw.SizedBox(height: 20),
-              pw.Text(
-                "Patient Summary",
-                style: pw.TextStyle(
-                  fontSize: 16,
-                  fontWeight: pw.FontWeight.bold,
+              
+              if (historyRows.isEmpty)
+                pw.Center(child: pw.Text("No medication activity recorded for this date."))
+              else
+                pw.Table.fromTextArray(
+                  headers: ['Patient Name', 'Slot', 'Medication', 'Time', 'Status'],
+                  data: historyRows,
+                  border: pw.TableBorder.all(color: PdfColors.grey300),
+                  headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                  headerDecoration: pw.BoxDecoration(color: PdfColor.fromHex('1565C0')),
+                  cellAlignment: pw.Alignment.centerLeft,
+                  cellAlignments: {
+                    1: pw.Alignment.center,
+                    3: pw.Alignment.center,
+                    4: pw.Alignment.center,
+                  }
                 ),
-              ),
-              pw.SizedBox(height: 5),
-              pw.Table.fromTextArray(
-                border: pw.TableBorder.all(
-                  color: PdfColors.grey400,
-                  width: 0.5,
-                ),
-                headerDecoration: const pw.BoxDecoration(
-                  color: PdfColors.blueGrey100,
-                ),
-                headerStyle: pw.TextStyle(
-                  fontWeight: pw.FontWeight.bold,
-                  fontSize: 10,
-                ),
-                cellStyle: const pw.TextStyle(fontSize: 9),
-                headers: summaryHeaders,
-                data: summaryData,
-                cellAlignments: {
-                  0: pw.Alignment.center,
-                  1: pw.Alignment.centerLeft,
-                  2: pw.Alignment.center,
-                  3: pw.Alignment.centerLeft,
-                  4: pw.Alignment.center,
-                },
-              ),
-              pw.SizedBox(height: 25),
-              pw.Text(
-                "Detailed Alarm Logs",
-                style: pw.TextStyle(
-                  fontSize: 16,
-                  fontWeight: pw.FontWeight.bold,
-                ),
-              ),
-              pw.SizedBox(height: 5),
-              ...detailedWidgets,
+                
+              pw.SizedBox(height: 20),
+              pw.Divider(),
+              pw.SizedBox(height: 10),
+              pw.Text("Total Patients Monitored: ${patients.length}", style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)),
             ];
           },
         ),
       );
 
+      // Save File
       String path;
       if (Platform.isAndroid) {
         final directory = await getExternalStorageDirectory();
-        if (directory != null) {
-          String newPath = directory.path.split("Android")[0];
-          path = "$newPath/Download";
-        } else {
-          path = "/storage/emulated/0/Download";
+        path = directory?.path ?? "";
+        if (path.contains("Android")) {
+            path = path.split("Android")[0] + "Download";
         }
       } else {
         final directory = await getApplicationDocumentsDirectory();
         path = directory.path;
       }
-
-      final dir = Directory(path);
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-      }
-
+      
       final file = File('$path/$fileName');
+      if (!await Directory(path).exists()) await Directory(path).create(recursive: true);
       await file.writeAsBytes(await pdf.save());
 
       if (context.mounted) {
         scaffoldMessenger.showSnackBar(
           SnackBar(
-            content: Text("Report saved to $path"),
+            content: Text("Report saved: $fileName"),
             backgroundColor: Colors.green,
-            duration: const Duration(seconds: 5),
             action: SnackBarAction(
               label: 'Open',
               textColor: Colors.white,
@@ -517,13 +405,9 @@ class FirestoreService {
         );
       }
     } catch (e) {
+      print("PDF Error: $e");
       if (context.mounted) {
-        scaffoldMessenger.showSnackBar(
-          SnackBar(
-            content: Text("Error generating PDF: $e"),
-            backgroundColor: Colors.red,
-          ),
-        );
+        scaffoldMessenger.showSnackBar(SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
       }
     }
   }

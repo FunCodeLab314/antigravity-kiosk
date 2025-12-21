@@ -18,6 +18,7 @@ import 'auth_screens.dart';
 import 'dashboard.dart';
 import 'welcome_screen.dart';
 
+// 1. Global Key for Navigation access from anywhere
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
@@ -43,6 +44,7 @@ class PillPalApp extends StatelessWidget {
           colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
           textTheme: GoogleFonts.poppinsTextTheme(),
         ),
+        // 2. StreamBuilder controls the ROOT widget
         home: StreamBuilder<User?>(
           stream: FirebaseAuth.instance.authStateChanges(),
           builder: (context, snapshot) {
@@ -50,8 +52,10 @@ class PillPalApp extends StatelessWidget {
               return const Scaffold(body: Center(child: CircularProgressIndicator()));
             }
             if (snapshot.hasData) {
+              // If logged in, show Dashboard
               return const DashboardScreen();
             }
+            // If not logged in, show Welcome Screen
             return const WelcomeScreen();
           },
         ),
@@ -64,7 +68,7 @@ class PillPalApp extends StatelessWidget {
   }
 }
 
-// ================== KIOSK STATE (WITH QUEUE) ==================
+// ... (Rest of your KioskState and classes remain exactly the same as you pasted)
 class KioskState extends ChangeNotifier {
   final FirestoreService _db = FirestoreService();
   List<Patient> patients = [];
@@ -75,10 +79,8 @@ class KioskState extends ChangeNotifier {
 
   DateTime now = DateTime.now();
   int _lastTriggeredMinute = -1;
-  bool isAlarmActive = false; // Is a popup currently showing?
+  bool isAlarmActive = false; 
 
-  // --- QUEUE SYSTEM ---
-  // Queue to hold waiting alarms: {patient: Patient, alarm: AlarmModel}
   List<Map<String, dynamic>> _alarmQueue = [];
   
   Patient? activePatient;
@@ -104,17 +106,14 @@ class KioskState extends ChangeNotifier {
   }
 
   void _checkAlarms() {
-    // If we already checked this minute, skip to avoid duplicates in queue
     if (now.minute == _lastTriggeredMinute) return;
 
     bool foundAny = false;
 
-    // Scan ALL patients for alarms matching current hour/minute
     for (var p in patients) {
       for (var a in p.alarms) {
         if (!a.isActive) continue;
         if (a.hour == now.hour && a.minute == now.minute) {
-          // Add to Queue
           _alarmQueue.add({'patient': p, 'alarm': a});
           foundAny = true;
         }
@@ -123,28 +122,22 @@ class KioskState extends ChangeNotifier {
 
     if (foundAny) {
       _lastTriggeredMinute = now.minute;
-      _processQueue(); // Try to process the queue immediately
+      _processQueue(); 
     }
   }
 
-  // Attempts to show the next alarm in the queue
   void _processQueue() async {
-    // If popup is already showing, do nothing (queue waits)
-    // If queue is empty, do nothing
     if (isAlarmActive || _alarmQueue.isEmpty) return;
 
-    // Dequeue next item
     final nextItem = _alarmQueue.removeAt(0);
     Patient p = nextItem['patient'];
     AlarmModel a = nextItem['alarm'];
 
-    // Setup Active State
     activePatient = p;
     activeAlarm = a;
     isAlarmActive = true;
     notifyListeners();
 
-    // Play Sound & Show Popup
     try {
       await _audioPlayer.setVolume(1.0);
       await _audioPlayer.resume();
@@ -152,7 +145,6 @@ class KioskState extends ChangeNotifier {
       print("Error playing sound: $e");
     }
     
-    // Use Key to navigate safely
     navigatorKey.currentState?.pushNamed('/alarm');
   }
 
@@ -187,17 +179,14 @@ class KioskState extends ChangeNotifier {
   }
 
   void _close() async {
-    // 1. Stop current alarm
     await _audioPlayer.stop();
     isAlarmActive = false;
     activePatient = null;
     activeAlarm = null;
     notifyListeners();
     
-    // 2. Close Popup
     navigatorKey.currentState?.pop();
 
-    // 3. CHECK QUEUE: If more alarms are waiting, trigger next one immediately
     Future.delayed(const Duration(milliseconds: 500), () {
        _processQueue();
     });
@@ -223,7 +212,6 @@ class KioskState extends ChangeNotifier {
   }
 }
 
-// ================== KIOSK MODE SCREEN (No changes needed, UI only) ==================
 class KioskModeScreen extends StatelessWidget {
   const KioskModeScreen({super.key});
 
@@ -235,20 +223,17 @@ class KioskModeScreen extends StatelessWidget {
           backgroundColor: const Color(0xFF1565C0),
           body: Stack(
             children: [
-              // Background circles...
               Positioned(top: -50, right: -50, child: CircleAvatar(radius: 100, backgroundColor: Colors.white.withOpacity(0.1))),
               Positioned(bottom: -50, left: -50, child: CircleAvatar(radius: 100, backgroundColor: Colors.white.withOpacity(0.1))),
               SafeArea(
                 child: Column(
                   children: [
-                    // Back Button & Status
                     Padding(
                       padding: const EdgeInsets.all(16),
                       child: Row(
                         children: [
                           IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)),
                           const Spacer(),
-                          // Online Status Chip
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
@@ -265,7 +250,6 @@ class KioskModeScreen extends StatelessWidget {
                         ],
                       ),
                     ),
-                    // Clock
                     Expanded(
                       child: Center(
                         child: Column(
@@ -274,7 +258,6 @@ class KioskModeScreen extends StatelessWidget {
                             Text(DateFormat('HH:mm').format(state.now), style: GoogleFonts.rubik(fontSize: 120, fontWeight: FontWeight.w500, color: Colors.white, letterSpacing: -2)),
                             Text(DateFormat('EEEE, MMM dd, yyyy').format(state.now), style: const TextStyle(fontSize: 24, color: Colors.white70)),
                             const SizedBox(height: 60),
-                            // Count
                             Container(
                               padding: const EdgeInsets.all(24),
                               decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(24), border: Border.all(color: Colors.white24)),
@@ -305,7 +288,6 @@ class KioskModeScreen extends StatelessWidget {
   }
 }
 
-// ================== ALARM POPUP (Standard UI) ==================
 class AlarmPopup extends StatelessWidget {
   const AlarmPopup({super.key});
 

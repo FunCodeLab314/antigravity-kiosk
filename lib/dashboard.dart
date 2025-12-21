@@ -18,7 +18,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    // Get Admin Name from Firebase Auth
     final user = FirebaseAuth.instance.currentUser;
     if (user?.displayName != null && user!.displayName!.isNotEmpty) {
       _adminName = user.displayName!;
@@ -34,43 +33,77 @@ class _DashboardScreenState extends State<DashboardScreen> {
         content: const Text("Are you sure you want to exit?"),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              FirebaseAuth.instance.signOut();
-            },
-            child: const Text("Logout", style: TextStyle(color: Colors.red)),
-          ),
+          TextButton(onPressed: () {
+            Navigator.pop(ctx);
+            FirebaseAuth.instance.signOut();
+          }, child: const Text("Logout", style: TextStyle(color: Colors.red))),
         ],
       ),
     );
+  }
+
+  // --- REPORT DIALOG (New Feature) ---
+  void _showReportDialog(List<Patient> patients) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text("Generate Report"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.today, color: Color(0xFF1565C0)),
+              title: const Text("Today's Report"),
+              onTap: () {
+                Navigator.pop(ctx);
+                _generateReport(patients, DateTime.now());
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.date_range, color: Color(0xFF1565C0)),
+              title: const Text("Select Date"),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: DateTime.now(),
+                  firstDate: DateTime(2024),
+                  lastDate: DateTime.now(),
+                );
+                if (picked != null) {
+                  _generateReport(patients, picked);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _generateReport(List<Patient> patients, DateTime date) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Generating PDF..."), duration: Duration(seconds: 2)));
+    _db.generateReport(patients, context, date);
   }
 
   // --- HELPER: GET AUTO SLOT ---
   String _getNextAvailableSlot(List<Patient> patients) {
     Set<int> usedSlots = patients.map((p) => int.tryParse(p.slotNumber) ?? 999).toSet();
     for (int i = 1; i <= 24; i++) {
-      if (!usedSlots.contains(i)) {
-        return i.toString();
-      }
+      if (!usedSlots.contains(i)) return i.toString();
     }
     return "Full";
   }
 
-  // --- ADD / EDIT DIALOG (Auto Slot) ---
-  void _showPatientDialog({
-    Patient? patientToEdit,
-    required List<Patient> existingPatients,
-  }) {
+  // --- ADD / EDIT DIALOG ---
+  void _showPatientDialog({Patient? patientToEdit, required List<Patient> existingPatients}) {
     final bool isEditing = patientToEdit != null;
     final nameCtrl = TextEditingController(text: isEditing ? patientToEdit.name : '');
     final ageCtrl = TextEditingController(text: isEditing ? patientToEdit.age.toString() : '');
     String gender = isEditing ? patientToEdit.gender : "Male";
     
-    // Auto Slot Logic
-    String assignedSlot = isEditing 
-        ? patientToEdit.slotNumber 
-        : _getNextAvailableSlot(existingPatients);
+    String assignedSlot = isEditing ? patientToEdit.slotNumber : _getNextAvailableSlot(existingPatients);
 
     List<Map<String, dynamic>> tempAlarms = [];
     if (isEditing) {
@@ -96,9 +129,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
             void addAlarm() {
               if (tempAlarms.length < 3) {
-                setState(() {
-                  tempAlarms.add({'time': '08:00', 'meds': <String>[]});
-                });
+                setState(() => tempAlarms.add({'time': '08:00', 'meds': <String>[]}));
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Max 3 alarms allowed")));
               }
@@ -111,19 +142,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   context: context,
                   builder: (context) => AlertDialog(
                     title: const Text("Add Medication"),
-                    content: TextField(
-                      controller: medInput,
-                      decoration: const InputDecoration(hintText: "Medication Name"),
-                      autofocus: true,
-                    ),
+                    content: TextField(controller: medInput, decoration: const InputDecoration(hintText: "Medication Name"), autofocus: true),
                     actions: [
                       TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
                       ElevatedButton(
                         onPressed: () {
                           if (medInput.text.isNotEmpty) {
-                            setState(() {
-                              tempAlarms[alarmIndex]['meds'].add(medInput.text);
-                            });
+                            setState(() => tempAlarms[alarmIndex]['meds'].add(medInput.text));
                             Navigator.pop(context);
                           }
                         },
@@ -148,7 +173,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       mainAxisSize: MainAxisSize.min,
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // INFO
                         TextFormField(
                           controller: nameCtrl,
                           textCapitalization: TextCapitalization.words,
@@ -170,37 +194,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onChanged: (v) => gender = v!,
                         ),
                         const SizedBox(height: 10),
-                        
-                        // AUTO ASSIGNED SLOT DISPLAY
                         Container(
                           padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.grey[200],
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.grey[400]!),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.grid_view, color: Colors.grey),
-                              const SizedBox(width: 10),
-                              Text(
-                                "Slot Assigned: $assignedSlot",
-                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87),
-                              ),
-                            ],
-                          ),
+                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey[400]!)),
+                          child: Row(children: [const Icon(Icons.grid_view, color: Colors.grey), const SizedBox(width: 10), Text("Slot Assigned: $assignedSlot", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))]),
                         ),
-
                         const Divider(height: 30),
-                        // ALARMS
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text("Alarms (Max 3)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                            if (tempAlarms.length < 3)
-                              IconButton(onPressed: addAlarm, icon: const Icon(Icons.add_circle, color: Color(0xFF1565C0))),
-                          ],
-                        ),
+                        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                          const Text("Alarms (Max 3)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                          if (tempAlarms.length < 3) IconButton(onPressed: addAlarm, icon: const Icon(Icons.add_circle, color: Color(0xFF1565C0))),
+                        ]),
                         ...tempAlarms.asMap().entries.map((entry) {
                           int index = entry.key;
                           Map<String, dynamic> alarm = entry.value;
@@ -213,33 +216,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Row(
-                                    children: [
-                                      const Icon(Icons.access_time, size: 18, color: Color(0xFF1565C0)),
-                                      const SizedBox(width: 8),
-                                      InkWell(
-                                        onTap: () async {
-                                          TimeOfDay? t = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 8, minute: 0));
-                                          if (t != null) {
-                                            String h = t.hour.toString().padLeft(2, '0');
-                                            String m = t.minute.toString().padLeft(2, '0');
-                                            setState(() => tempAlarms[index]['time'] = "$h:$m");
-                                          }
-                                        },
-                                        child: Text(alarm['time'], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1565C0))),
-                                      ),
-                                      const Spacer(),
-                                      IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () => setState(() => tempAlarms.removeAt(index))),
-                                    ],
-                                  ),
+                                  Row(children: [
+                                    const Icon(Icons.access_time, size: 18, color: Color(0xFF1565C0)),
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: () async {
+                                        TimeOfDay? t = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 8, minute: 0));
+                                        if (t != null) {
+                                          String h = t.hour.toString().padLeft(2, '0');
+                                          String m = t.minute.toString().padLeft(2, '0');
+                                          setState(() => tempAlarms[index]['time'] = "$h:$m");
+                                        }
+                                      },
+                                      child: Text(alarm['time'], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1565C0))),
+                                    ),
+                                    const Spacer(),
+                                    IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () => setState(() => tempAlarms.removeAt(index))),
+                                  ]),
                                   const Divider(),
-                                  Wrap(
-                                    spacing: 6,
-                                    children: [
-                                      ...meds.map((m) => Chip(label: Text(m, style: const TextStyle(fontSize: 11)), backgroundColor: Colors.white, onDeleted: () => setState(() => meds.remove(m)))),
-                                      if (meds.length < 5) ActionChip(label: const Text("+ Med"), backgroundColor: Colors.white, onPressed: () => addMedication(index)),
-                                    ],
-                                  ),
+                                  Wrap(spacing: 6, children: [
+                                    ...meds.map((m) => Chip(label: Text(m, style: const TextStyle(fontSize: 11)), backgroundColor: Colors.white, onDeleted: () => setState(() => meds.remove(m)))),
+                                    if (meds.length < 5) ActionChip(label: const Text("+ Med"), backgroundColor: Colors.white, onPressed: () => addMedication(index)),
+                                  ]),
                                 ],
                               ),
                             ),
@@ -317,7 +315,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  // --- STATS GRAPH WIDGET (PAGE 1) ---
+  // --- PAGE 1: STATS ---
   Widget _buildStatsPage(List<Patient> patients) {
     int totalPatients = patients.length;
     int skippedCount = 0;
@@ -334,7 +332,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
     
-    // Prevent 0 division
     if (totalPatients == 0 && skippedCount == 0 && takenCount == 0 && pendingCount == 0) pendingCount = 1;
 
     return Padding(
@@ -344,75 +341,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           const Text("Overview", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.black87)),
           const SizedBox(height: 20),
-          
-          // Welcome Admin Card
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(colors: [Color(0xFF1565C0), Color(0xFF64B5F6)]),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Welcome back,", style: TextStyle(color: Colors.white70, fontSize: 16)),
-                Text(_adminName, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), borderRadius: BorderRadius.circular(12)),
-                      child: const Icon(Icons.people, color: Colors.white),
-                    ),
-                    const SizedBox(width: 15),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("$totalPatients", style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-                        const Text("Total Patients", style: TextStyle(color: Colors.white70)),
-                      ],
-                    )
-                  ],
-                ),
-              ],
-            ),
+            decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF1565C0), Color(0xFF64B5F6)]), borderRadius: BorderRadius.circular(20)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text("Welcome back,", style: TextStyle(color: Colors.white70, fontSize: 16)),
+              Text(_adminName, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              Row(children: [
+                Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.people, color: Colors.white)),
+                const SizedBox(width: 15),
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("$totalPatients", style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)), const Text("Total Patients", style: TextStyle(color: Colors.white70))]),
+              ]),
+            ]),
           ),
-          
           const SizedBox(height: 30),
           const Text("Medication Status", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 20),
-          
           Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                  child: PieChart(
-                    PieChartData(
-                      sectionsSpace: 2,
-                      centerSpaceRadius: 40,
-                      sections: [
-                        PieChartSectionData(value: takenCount.toDouble(), color: Colors.green, radius: 30, showTitle: false),
-                        PieChartSectionData(value: skippedCount.toDouble(), color: Colors.orange, radius: 30, showTitle: false),
-                        PieChartSectionData(value: pendingCount.toDouble(), color: Colors.grey[300], radius: 25, showTitle: false),
-                      ],
-                    ),
-                  ),
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _buildLegendItem(Colors.green, "Taken ($takenCount)"),
-                    const SizedBox(height: 10),
-                    _buildLegendItem(Colors.orange, "Skipped ($skippedCount)"),
-                    const SizedBox(height: 10),
-                    _buildLegendItem(Colors.grey[300]!, "Pending ($pendingCount)"),
-                  ],
-                ),
-              ],
-            ),
+            child: Row(children: [
+              Expanded(child: PieChart(PieChartData(sectionsSpace: 2, centerSpaceRadius: 40, sections: [
+                PieChartSectionData(value: takenCount.toDouble(), color: Colors.green, radius: 30, showTitle: false),
+                PieChartSectionData(value: skippedCount.toDouble(), color: Colors.orange, radius: 30, showTitle: false),
+                PieChartSectionData(value: pendingCount.toDouble(), color: Colors.grey[300], radius: 25, showTitle: false),
+              ]))),
+              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                _buildLegendItem(Colors.green, "Taken ($takenCount)"),
+                const SizedBox(height: 10),
+                _buildLegendItem(Colors.orange, "Skipped ($skippedCount)"),
+                const SizedBox(height: 10),
+                _buildLegendItem(Colors.grey[300]!, "Pending ($pendingCount)"),
+              ]),
+            ]),
           ),
         ],
       ),
@@ -420,20 +381,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildLegendItem(Color color, String text) {
-    return Row(
-      children: [
-        CircleAvatar(radius: 6, backgroundColor: color),
-        const SizedBox(width: 8),
-        Text(text, style: const TextStyle(fontWeight: FontWeight.w500)),
-      ],
-    );
+    return Row(children: [CircleAvatar(radius: 6, backgroundColor: color), const SizedBox(width: 8), Text(text, style: const TextStyle(fontWeight: FontWeight.w500))]);
   }
 
-  // --- PATIENTS LIST WIDGET (PAGE 2) ---
+  // --- PAGE 2: PATIENTS ---
   Widget _buildPatientsPage(List<Patient> patients) {
-    if (patients.isEmpty) {
-      return const Center(child: Text("No patients found."));
-    }
+    if (patients.isEmpty) return const Center(child: Text("No patients found."));
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
       itemCount: patients.length,
@@ -445,18 +398,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: ListTile(
             contentPadding: const EdgeInsets.all(16),
-            leading: CircleAvatar(
-              radius: 25,
-              backgroundColor: const Color(0xFFE3F2FD),
-              child: Text(p.slotNumber, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF1565C0))),
-            ),
+            leading: CircleAvatar(radius: 25, backgroundColor: const Color(0xFFE3F2FD), child: Text(p.slotNumber, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF1565C0)))),
             title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
             subtitle: Text("${p.age} yrs • ${p.gender} • ${p.alarms.length} Alarms"),
             onTap: () => _showPatientDialog(patientToEdit: p, existingPatients: patients),
-            trailing: IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.red),
-              onPressed: () => _confirmDelete(p.id!, p.name),
-            ),
+            trailing: IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: () => _confirmDelete(p.id!, p.name)),
           ),
         );
       },
@@ -478,7 +424,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             elevation: 0,
             title: const Text("PillPal Admin", style: TextStyle(color: Color(0xFF1565C0), fontWeight: FontWeight.bold)),
             actions: [
-              IconButton(icon: const Icon(Icons.description_outlined, color: Colors.grey), onPressed: () => _db.generateReport(patients, context)),
+              IconButton(icon: const Icon(Icons.description_outlined, color: Colors.grey), onPressed: () => _showReportDialog(patients)), // Call Dialog
               IconButton(icon: const Icon(Icons.logout, color: Colors.grey), onPressed: _confirmLogout),
             ],
           ),
@@ -490,30 +436,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _buildPatientsPage(patients),
             ],
           ),
-          floatingActionButton: _currentPage == 1 // Only show FAB on Patient Page
-              ? FloatingActionButton(
-                  onPressed: () => _showPatientDialog(existingPatients: patients),
-                  backgroundColor: const Color(0xFF1565C0),
-                  child: const Icon(Icons.add, color: Colors.white),
-                )
+          floatingActionButton: _currentPage == 1
+              ? FloatingActionButton(onPressed: () => _showPatientDialog(existingPatients: patients), backgroundColor: const Color(0xFF1565C0), child: const Icon(Icons.add, color: Colors.white))
               : null,
           bottomNavigationBar: BottomAppBar(
              height: 60,
              child: Row(
                mainAxisAlignment: MainAxisAlignment.spaceAround,
                children: [
-                 IconButton(
-                   icon: Icon(Icons.dashboard, color: _currentPage == 0 ? const Color(0xFF1565C0) : Colors.grey),
-                   onPressed: () => _pageController.animateToPage(0, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
-                 ),
-                 IconButton(
-                   icon: Icon(Icons.people, color: _currentPage == 1 ? const Color(0xFF1565C0) : Colors.grey),
-                   onPressed: () => _pageController.animateToPage(1, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut),
-                 ),
-                 IconButton(
-                   icon: const Icon(Icons.devices, color: Colors.grey),
-                   onPressed: () => Navigator.pushNamed(context, '/kiosk'),
-                 ),
+                 IconButton(icon: Icon(Icons.dashboard, color: _currentPage == 0 ? const Color(0xFF1565C0) : Colors.grey), onPressed: () => _pageController.animateToPage(0, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut)),
+                 IconButton(icon: Icon(Icons.people, color: _currentPage == 1 ? const Color(0xFF1565C0) : Colors.grey), onPressed: () => _pageController.animateToPage(1, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut)),
+                 IconButton(icon: const Icon(Icons.devices, color: Colors.grey), onPressed: () => Navigator.pushNamed(context, '/kiosk')),
                ],
              ),
           ),
