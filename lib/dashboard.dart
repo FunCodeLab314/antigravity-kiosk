@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'services.dart';
+import 'main.dart'; // To access flutterLocalNotificationsPlugin
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -14,6 +17,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   String _adminName = "Admin";
+  Set<String> _notifiedSlots = {}; // To prevent spamming notifications for the same low slot
 
   @override
   void initState() {
@@ -23,6 +27,99 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _adminName = user.displayName!;
     }
   }
+
+  // --- REFILL & NOTIFICATION LOGIC ---
+  void _checkInventoryLevels(List<Patient> patients) {
+    for (var p in patients) {
+      p.slotInventory.forEach((slot, count) {
+        String key = "${p.id}_$slot";
+        
+        // If Low Stock (<= 1) and not yet notified this session
+        if (count <= 1 && !_notifiedSlots.contains(key)) {
+          _showLowStockNotification(p.name, slot, count);
+          _notifiedSlots.add(key);
+        } 
+        // If refilled (count > 1), remove from notified set so we can notify again later
+        else if (count > 1 && _notifiedSlots.contains(key)) {
+          _notifiedSlots.remove(key);
+        }
+      });
+    }
+  }
+
+  Future<void> _showLowStockNotification(String pName, String slot, int count) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'refill_channel', 'Refill Alerts',
+      importance: Importance.high,
+      priority: Priority.high,
+      color: Colors.red,
+      playSound: true,
+    );
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    
+    // Only send to the device where this admin is logged in (implicit by running on this device)
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecond,
+      "Refill Warning!",
+      "Slot $slot for $pName is low ($count boxes left). Please refill.",
+      details,
+    );
+  }
+
+  void _showRefillDialog(List<Patient> patients) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [Icon(Icons.inventory, color: Color(0xFF1565C0)), SizedBox(width: 10), Text("Inventory Management")]),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: patients.length,
+            itemBuilder: (context, index) {
+              final p = patients[index];
+              return ExpansionTile(
+                title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text("Patient #${p.patientNumber}"),
+                children: p.slotInventory.entries.map((entry) {
+                  String slot = entry.key;
+                  int count = entry.value;
+                  bool isLow = count <= 1;
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: isLow ? Colors.red : Colors.green,
+                      child: Icon(isLow ? Icons.warning : Icons.check, color: Colors.white, size: 16),
+                    ),
+                    title: Text("Slot $slot"),
+                    subtitle: Text(isLow ? "Low Stock!" : "Healthy"),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text("$count/3 Boxes", style: TextStyle(color: isLow ? Colors.red : Colors.black, fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 10),
+                        ElevatedButton(
+                          onPressed: () {
+                             _db.refillSlot(p.id!, slot);
+                             Navigator.pop(ctx);
+                             ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Slot $slot refilled for ${p.name}!")));
+                          },
+                          style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10)),
+                          child: const Text("Refill"),
+                        )
+                      ],
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Close"))],
+      ),
+    );
+  }
+
+  // --- DIALOGS & NAVIGATION ---
 
   void _confirmLogout() {
     showDialog(
@@ -41,79 +138,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  void _showReportDialog(List<Patient> patients) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text("Generate Report"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.today, color: Color(0xFF1565C0)),
-              title: const Text("Today's Report"),
-              onTap: () {
-                Navigator.pop(ctx);
-                _generateReport(patients, DateTime.now());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.date_range, color: Color(0xFF1565C0)),
-              title: const Text("Select Date"),
-              onTap: () async {
-                Navigator.pop(ctx);
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: DateTime.now(),
-                  firstDate: DateTime(2024),
-                  lastDate: DateTime.now(),
-                );
-                if (picked != null) {
-                  _generateReport(patients, picked);
-                }
-              },
-            ),
-          ],
-        ),
-      ),
-    );
+  void _openHistoryScreen() {
+    Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => HistoryScreen(db: _db)));
   }
 
-  void _generateReport(List<Patient> patients, DateTime date) {
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Generating PDF..."), duration: Duration(seconds: 2)));
-    _db.generateReport(patients, context, date);
-  }
-
-  String _getNextAvailableSlot(List<Patient> patients) {
-    Set<int> usedSlots = patients.map((p) => int.tryParse(p.slotNumber) ?? 999).toSet();
-    for (int i = 1; i <= 24; i++) {
-      if (!usedSlots.contains(i)) return i.toString();
-    }
-    return "Full";
-  }
-
-  void _showPatientDialog({Patient? patientToEdit, required List<Patient> existingPatients}) {
+  void _showPatientDialog({Patient? patientToEdit}) {
     final bool isEditing = patientToEdit != null;
     final nameCtrl = TextEditingController(text: isEditing ? patientToEdit.name : '');
     final ageCtrl = TextEditingController(text: isEditing ? patientToEdit.age.toString() : '');
     String gender = isEditing ? patientToEdit.gender : "Male";
     
-    String assignedSlot = isEditing ? patientToEdit.slotNumber : _getNextAvailableSlot(existingPatients);
-
     List<Map<String, dynamic>> tempAlarms = [];
     if (isEditing) {
       for (var alarm in patientToEdit.alarms) {
         tempAlarms.add({
           'time': alarm.timeOfDay,
+          'type': alarm.type,
           'meds': alarm.medications.map((m) => m.name).toList(),
         });
       }
     }
 
     final formKey = GlobalKey<FormState>();
-    double dialogWidth = MediaQuery.of(context).size.width * 0.9;
-    if (dialogWidth > 500) dialogWidth = 500;
 
     showDialog(
       context: context,
@@ -123,51 +169,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (context, setState) {
             bool isSaving = false;
 
+            // Helper to calculate slot for display
+            String getSlotForType(String type, int pNum) {
+               if (!isEditing && pNum == 0) return "Auto-Assigned";
+               if (pNum <= 4) {
+                 if (type == 'Breakfast') return pNum.toString();
+                 if (type == 'Lunch') return (pNum + 4).toString();
+                 if (type == 'Dinner') return (pNum + 8).toString();
+               } else {
+                 if (type == 'Breakfast') return (pNum + 8).toString();
+                 if (type == 'Lunch') return (pNum + 12).toString();
+                 if (type == 'Dinner') return (pNum + 16).toString();
+               }
+               return "-";
+            }
+
             void addAlarm() {
-              if (tempAlarms.length < 3) {
-                setState(() => tempAlarms.add({'time': '08:00', 'meds': <String>[]}));
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Max 3 alarms allowed")));
-              }
+               setState(() => tempAlarms.add({'time': '08:00', 'type': 'Breakfast', 'meds': <String>[]}));
             }
 
             void addMedication(int alarmIndex) {
-              if (tempAlarms[alarmIndex]['meds'].length < 5) {
-                TextEditingController medInput = TextEditingController();
-                showDialog(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: const Text("Add Medication"),
-                    content: TextField(controller: medInput, decoration: const InputDecoration(hintText: "Medication Name"), autofocus: true),
-                    actions: [
-                      TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-                      ElevatedButton(
-                        onPressed: () {
-                          if (medInput.text.isNotEmpty) {
-                            setState(() => tempAlarms[alarmIndex]['meds'].add(medInput.text));
-                            Navigator.pop(context);
-                          }
-                        },
-                        child: const Text("Add"),
-                      ),
-                    ],
-                  ),
-                );
-              }
+               TextEditingController medInput = TextEditingController();
+               showDialog(
+                 context: context,
+                 builder: (c) => AlertDialog(
+                   title: const Text("Add Medication"),
+                   content: TextField(controller: medInput, decoration: const InputDecoration(hintText: "Med Name")),
+                   actions: [
+                     TextButton(onPressed: () => Navigator.pop(c), child: const Text("Cancel")),
+                     ElevatedButton(onPressed: () {
+                       if (medInput.text.isNotEmpty) {
+                         setState(() => tempAlarms[alarmIndex]['meds'].add(medInput.text));
+                         Navigator.pop(c);
+                       }
+                     }, child: const Text("Add"))
+                   ],
+                 )
+               );
             }
 
             return AlertDialog(
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-              insetPadding: const EdgeInsets.all(20),
               title: Text(isEditing ? "Edit Patient" : "Add Patient", style: const TextStyle(color: Color(0xFF1565C0))),
               content: SizedBox(
-                width: dialogWidth,
+                width: 500,
                 child: SingleChildScrollView(
                   child: Form(
                     key: formKey,
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         TextFormField(
                           controller: nameCtrl,
@@ -192,48 +242,62 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         const SizedBox(height: 10),
                         Container(
                           padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey[400]!)),
-                          child: Row(children: [const Icon(Icons.grid_view, color: Colors.grey), const SizedBox(width: 10), Text("Slot Assigned: $assignedSlot", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))]),
+                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)),
+                          child: Text(isEditing 
+                            ? "Patient #${patientToEdit!.patientNumber} - Assigned Slots: ${patientToEdit.assignedSlots}"
+                            : "Patient Number & Slots will be auto-assigned (1-8) upon saving.",
+                            style: const TextStyle(fontSize: 12, color: Colors.black54)
+                          ),
                         ),
                         const Divider(height: 30),
                         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                          const Text("Alarms (Max 3)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
-                          if (tempAlarms.length < 3) IconButton(onPressed: addAlarm, icon: const Icon(Icons.add_circle, color: Color(0xFF1565C0))),
+                          const Text("Alarms", style: TextStyle(fontWeight: FontWeight.bold)),
+                          IconButton(onPressed: addAlarm, icon: const Icon(Icons.add_circle, color: Color(0xFF1565C0))),
                         ]),
                         ...tempAlarms.asMap().entries.map((entry) {
                           int index = entry.key;
                           Map<String, dynamic> alarm = entry.value;
-                          List<String> meds = alarm['meds'];
                           return Card(
+                            elevation: 0,
                             color: Colors.blue[50],
-                            margin: const EdgeInsets.only(bottom: 10),
+                            margin: const EdgeInsets.only(bottom: 8),
                             child: Padding(
-                              padding: const EdgeInsets.all(10),
+                              padding: const EdgeInsets.all(8.0),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Row(children: [
-                                    const Icon(Icons.access_time, size: 18, color: Color(0xFF1565C0)),
-                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: DropdownButtonFormField<String>(
+                                        value: alarm['type'],
+                                        items: ["Breakfast", "Lunch", "Dinner"].map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+                                        onChanged: (v) => setState(() => alarm['type'] = v),
+                                        decoration: const InputDecoration(labelText: "Meal/Type", isDense: true, border: InputBorder.none),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
                                     InkWell(
                                       onTap: () async {
                                         TimeOfDay? t = await showTimePicker(context: context, initialTime: const TimeOfDay(hour: 8, minute: 0));
                                         if (t != null) {
                                           String h = t.hour.toString().padLeft(2, '0');
                                           String m = t.minute.toString().padLeft(2, '0');
-                                          setState(() => tempAlarms[index]['time'] = "$h:$m");
+                                          setState(() => alarm['time'] = "$h:$m");
                                         }
                                       },
-                                      child: Text(alarm['time'], style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1565C0))),
+                                      child: Text(alarm['time'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Color(0xFF1565C0))),
                                     ),
-                                    const Spacer(),
-                                    IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 20), onPressed: () => setState(() => tempAlarms.removeAt(index))),
+                                    IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => setState(() => tempAlarms.removeAt(index))),
                                   ]),
                                   const Divider(),
+                                  Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Text("Target Slot: ${getSlotForType(alarm['type'], isEditing ? patientToEdit!.patientNumber : 0)}", style: const TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
+                                  ),
+                                  const SizedBox(height: 5),
                                   Wrap(spacing: 6, children: [
-                                    ...meds.map((m) => Chip(label: Text(m, style: const TextStyle(fontSize: 11)), backgroundColor: Colors.white, onDeleted: () => setState(() => meds.remove(m)))),
-                                    if (meds.length < 5) ActionChip(label: const Text("+ Med"), backgroundColor: Colors.white, onPressed: () => addMedication(index)),
-                                  ]),
+                                    ...(alarm['meds'] as List<String>).map((m) => Chip(label: Text(m), backgroundColor: Colors.white, onDeleted: () => setState(() => (alarm['meds'] as List<String>).remove(m)))),
+                                    ActionChip(label: const Text("+ Med"), backgroundColor: Colors.white, onPressed: () => addMedication(index)),
+                                  ])
                                 ],
                               ),
                             ),
@@ -247,17 +311,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
               actions: [
                 TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white),
                   onPressed: isSaving ? null : () async {
                     if (formKey.currentState!.validate()) {
-                      if (assignedSlot == "Full") {
-                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No slots available!")));
-                         return;
-                      }
                       setState(() => isSaving = true);
                       List<AlarmModel> finalAlarms = tempAlarms.map((a) {
                         return AlarmModel(
                           timeOfDay: a['time'],
+                          type: a['type'],
                           isActive: true,
                           medications: (a['meds'] as List<String>).map((mName) => Medication(name: mName)).toList(),
                         );
@@ -265,13 +325,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
                       try {
                         if (isEditing) {
-                          await _db.updatePatient(patientToEdit!, nameCtrl.text, int.parse(ageCtrl.text), assignedSlot, gender, finalAlarms);
+                          await _db.updatePatient(patientToEdit!, nameCtrl.text, int.parse(ageCtrl.text), gender, finalAlarms);
                         } else {
-                          await _db.addPatient(nameCtrl.text, int.parse(ageCtrl.text), assignedSlot, gender, finalAlarms);
+                          await _db.addPatient(nameCtrl.text, int.parse(ageCtrl.text), gender, _adminName, finalAlarms);
                         }
                         if (context.mounted) {
                           Navigator.pop(ctx);
-                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isEditing ? "Updated" : "Added successfully"), backgroundColor: Colors.green));
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Saved Successfully"), backgroundColor: Colors.green));
                         }
                       } catch (e) {
                         setState(() => isSaving = false);
@@ -279,7 +339,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       }
                     }
                   },
-                  child: isSaving ? const CircularProgressIndicator(color: Colors.white) : Text(isEditing ? "Update" : "Save"),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white),
+                  child: isSaving ? const CircularProgressIndicator(color: Colors.white) : const Text("Save"),
                 ),
               ],
             );
@@ -311,102 +372,76 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildStatsPage(List<Patient> patients) {
-    int totalPatients = patients.length;
-    int skippedCount = 0;
-    int takenCount = 0;
-    int pendingCount = 0;
+    // Check inventory levels every time the stats page rebuilds (or updates)
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkInventoryLevels(patients));
 
+    int takenCount = 0;
+    int skippedCount = 0;
+    int pendingCount = 0;
+    
     for (var p in patients) {
       for (var a in p.alarms) {
         for (var m in a.medications) {
-          if (m.status == 'skipped') skippedCount++;
-          else if (m.status == 'taken') takenCount++;
-          else pendingCount++;
+           if (m.status == 'taken') takenCount++;
+           else if (m.status == 'skipped') skippedCount++;
+           else pendingCount++;
         }
       }
     }
-    
-    // --- FIX: Logic for Empty Graph ---
-    bool isEmpty = (skippedCount == 0 && takenCount == 0 && pendingCount == 0);
-    
-    // Create Chart Sections
-    List<PieChartSectionData> sections;
-    if (isEmpty) {
-      // Show Gray Circle
-      sections = [
-        PieChartSectionData(
-          value: 1, 
-          color: Colors.grey[300], 
-          radius: 30, 
-          showTitle: false
-        )
-      ];
-    } else {
-      sections = [
-        PieChartSectionData(value: takenCount.toDouble(), color: Colors.green, radius: 30, showTitle: false),
-        PieChartSectionData(value: skippedCount.toDouble(), color: Colors.orange, radius: 30, showTitle: false),
-        PieChartSectionData(value: pendingCount.toDouble(), color: Colors.grey[300], radius: 25, showTitle: false),
-      ];
-    }
+    bool isEmpty = (takenCount + skippedCount + pendingCount) == 0;
 
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text("Overview", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.black87)),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text("Overview", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+              // Refill Button
+              IconButton(onPressed: () => _showRefillDialog(patients), icon: const Icon(Icons.inventory, color: Color(0xFF1565C0), size: 30)),
+            ],
+          ),
           const SizedBox(height: 20),
           Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF1565C0), Color(0xFF64B5F6)]), borderRadius: BorderRadius.circular(20)),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text("Welcome back,", style: TextStyle(color: Colors.white70, fontSize: 16)),
-              Text(_adminName, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 20),
-              Row(children: [
-                Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), borderRadius: BorderRadius.circular(12)), child: const Icon(Icons.people, color: Colors.white)),
-                const SizedBox(width: 15),
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text("$totalPatients", style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)), const Text("Total Patients", style: TextStyle(color: Colors.white70))]),
-              ]),
-            ]),
+             width: double.infinity,
+             padding: const EdgeInsets.all(20),
+             decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF1565C0), Color(0xFF64B5F6)]), borderRadius: BorderRadius.circular(20)),
+             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+               const Text("Welcome back,", style: TextStyle(color: Colors.white70)),
+               Text(_adminName, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
+               const SizedBox(height: 10),
+               Text("Patients: ${patients.length}/8", style: const TextStyle(color: Colors.white, fontSize: 16)),
+             ]),
           ),
           const SizedBox(height: 30),
-          const Text("Medication Status", style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 20),
           Expanded(
-            child: Row(children: [
-              Expanded(
-                child: PieChart(
-                  PieChartData(
-                    sectionsSpace: isEmpty ? 0 : 2,
-                    centerSpaceRadius: 40,
-                    sections: sections,
-                  ),
-                ),
-              ),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
-                _buildLegendItem(Colors.green, "Taken ($takenCount)"),
-                const SizedBox(height: 10),
-                _buildLegendItem(Colors.orange, "Skipped ($skippedCount)"),
-                const SizedBox(height: 10),
-                _buildLegendItem(Colors.grey[300]!, "Pending ($pendingCount)"),
-              ]),
-            ]),
+            child: isEmpty ? const Center(child: Text("No Data Available")) : PieChart(
+              PieChartData(
+                sections: [
+                   PieChartSectionData(value: takenCount.toDouble(), color: Colors.green, radius: 30, showTitle: false),
+                   PieChartSectionData(value: skippedCount.toDouble(), color: Colors.orange, radius: 30, showTitle: false),
+                   PieChartSectionData(value: pendingCount.toDouble(), color: Colors.grey[300], radius: 25, showTitle: false),
+                ],
+                centerSpaceRadius: 40,
+              )
+            ),
           ),
+          const SizedBox(height: 20),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+             CircleAvatar(radius: 6, backgroundColor: Colors.green), const SizedBox(width: 5), Text("Taken ($takenCount)"), const SizedBox(width: 15),
+             CircleAvatar(radius: 6, backgroundColor: Colors.orange), const SizedBox(width: 5), Text("Skipped ($skippedCount)"),
+          ]),
         ],
       ),
     );
   }
 
-  Widget _buildLegendItem(Color color, String text) {
-    return Row(children: [CircleAvatar(radius: 6, backgroundColor: color), const SizedBox(width: 8), Text(text, style: const TextStyle(fontWeight: FontWeight.w500))]);
-  }
-
   Widget _buildPatientsPage(List<Patient> patients) {
     if (patients.isEmpty) return const Center(child: Text("No patients found."));
     return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+      padding: const EdgeInsets.all(20),
       itemCount: patients.length,
       itemBuilder: (context, index) {
         final p = patients[index];
@@ -416,11 +451,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: ListTile(
             contentPadding: const EdgeInsets.all(16),
-            leading: CircleAvatar(radius: 25, backgroundColor: const Color(0xFFE3F2FD), child: Text(p.slotNumber, style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF1565C0)))),
+            leading: CircleAvatar(radius: 25, backgroundColor: const Color(0xFFE3F2FD), child: Text("${p.patientNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Color(0xFF1565C0)))),
             title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text("${p.age} yrs • ${p.gender} • ${p.alarms.length} Alarms"),
-            onTap: () => _showPatientDialog(patientToEdit: p, existingPatients: patients),
-            trailing: IconButton(icon: const Icon(Icons.delete_outline, color: Colors.red), onPressed: () => _confirmDelete(p.id!, p.name)),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text("Age: ${p.age} • ${p.gender}"),
+                Text("Assigned Slots: ${p.assignedSlots}", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                Text("Created By: ${p.createdBy}", style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
+              ],
+            ),
+            trailing: IconButton(icon: const Icon(Icons.edit, color: Colors.grey), onPressed: () => _showPatientDialog(patientToEdit: p)),
+            onLongPress: () => _confirmDelete(p.id!, p.name),
           ),
         );
       },
@@ -442,7 +484,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             elevation: 0,
             title: const Text("PillPal Admin", style: TextStyle(color: Color(0xFF1565C0), fontWeight: FontWeight.bold)),
             actions: [
-              IconButton(icon: const Icon(Icons.description_outlined, color: Colors.grey), onPressed: () => _showReportDialog(patients)),
+              IconButton(icon: const Icon(Icons.history, color: Colors.grey), onPressed: _openHistoryScreen),
               IconButton(icon: const Icon(Icons.logout, color: Colors.grey), onPressed: _confirmLogout),
             ],
           ),
@@ -455,7 +497,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           floatingActionButton: _currentPage == 1
-              ? FloatingActionButton(onPressed: () => _showPatientDialog(existingPatients: patients), backgroundColor: const Color(0xFF1565C0), child: const Icon(Icons.add, color: Colors.white))
+              ? FloatingActionButton(onPressed: () => _showPatientDialog(), backgroundColor: const Color(0xFF1565C0), child: const Icon(Icons.add, color: Colors.white))
               : null,
           bottomNavigationBar: BottomAppBar(
              height: 60,
@@ -470,6 +512,154 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+// ================== NEW HISTORY SCREEN ==================
+
+class HistoryScreen extends StatefulWidget {
+  final FirestoreService db;
+  const HistoryScreen({super.key, required this.db});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  DateTime _selectedDate = DateTime.now();
+  List<HistoryRecord> _records = [];
+  bool _isLoading = true;
+  String _sortColumn = 'Time';
+  bool _sortAsc = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchHistory();
+  }
+
+  void _fetchHistory() async {
+    setState(() => _isLoading = true);
+    final data = await widget.db.getHistory(_selectedDate);
+    setState(() {
+      _records = data;
+      _sortRecords();
+      _isLoading = false;
+    });
+  }
+
+  void _sortRecords() {
+    _records.sort((a, b) {
+      int cmp = 0;
+      switch (_sortColumn) {
+        case 'Patient Name': cmp = a.patientName.compareTo(b.patientName); break;
+        case 'Patient No.': cmp = a.patientNumber.compareTo(b.patientNumber); break;
+        case 'Time': cmp = a.actionTime.compareTo(b.actionTime); break;
+        case 'Admin': cmp = a.adminName.compareTo(b.adminName); break;
+      }
+      return _sortAsc ? cmp : -cmp;
+    });
+  }
+
+  void _onSort(String column) {
+    if (_sortColumn == column) {
+      setState(() {
+        _sortAsc = !_sortAsc;
+        _sortRecords();
+      });
+    } else {
+      setState(() {
+        _sortColumn = column;
+        _sortAsc = true;
+        _sortRecords();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Medication History", style: TextStyle(color: Colors.white)),
+        backgroundColor: const Color(0xFF1565C0),
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.picture_as_pdf),
+            onPressed: () => widget.db.generatePdfReport(_records, context, _selectedDate),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16.0),
+            color: Colors.grey[100],
+            child: Row(children: [
+              const Text("Date: ", style: TextStyle(fontWeight: FontWeight.bold)),
+              TextButton.icon(
+                icon: const Icon(Icons.calendar_today, size: 18),
+                label: Text(DateFormat('yyyy-MM-dd').format(_selectedDate)),
+                onPressed: () async {
+                  final d = await showDatePicker(context: context, initialDate: _selectedDate, firstDate: DateTime(2024), lastDate: DateTime.now());
+                  if (d != null) {
+                    setState(() => _selectedDate = d);
+                    _fetchHistory();
+                  }
+                },
+              ),
+              const Spacer(),
+              const Text("Sort by: ", style: TextStyle(fontSize: 12)),
+              DropdownButton<String>(
+                value: _sortColumn,
+                style: const TextStyle(fontSize: 12, color: Colors.black),
+                items: ['Patient Name', 'Patient No.', 'Time', 'Admin'].map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+                onChanged: (v) => _onSort(v!),
+              )
+            ]),
+          ),
+          Expanded(
+            child: _isLoading 
+              ? const Center(child: CircularProgressIndicator()) 
+              : _records.isEmpty 
+                  ? const Center(child: Text("No records found for this date."))
+                  : SingleChildScrollView(
+                      scrollDirection: Axis.vertical,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: DataTable(
+                          sortColumnIndex: ['Patient Name', 'Patient No.', 'Medication', 'Time', 'Status', 'Slot', 'Admin'].indexOf(_sortColumn) == -1 ? 3 : ['Patient Name', 'Patient No.', 'Medication', 'Time', 'Status', 'Slot', 'Admin'].indexOf(_sortColumn),
+                          sortAscending: _sortAsc,
+                          headingRowColor: MaterialStateProperty.all(Colors.blue[50]),
+                          columns: [
+                            DataColumn(label: const Text("Patient"), onSort: (_,__) => _onSort('Patient Name')),
+                            DataColumn(label: const Text("No."), numeric: true, onSort: (_,__) => _onSort('Patient No.')),
+                            const DataColumn(label: Text("Medication")),
+                            DataColumn(label: const Text("Time"), onSort: (_,__) => _onSort('Time')),
+                            const DataColumn(label: Text("Status")),
+                            const DataColumn(label: Text("Slot")),
+                            DataColumn(label: const Text("Admin"), onSort: (_,__) => _onSort('Admin')),
+                          ],
+                          rows: _records.map((r) => DataRow(cells: [
+                            DataCell(Text(r.patientName)),
+                            DataCell(Text(r.patientNumber.toString())),
+                            DataCell(Text(r.medicationName)),
+                            DataCell(Text(DateFormat('HH:mm').format(r.actionTime))),
+                            DataCell(Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(color: r.status == 'taken' ? Colors.green[100] : Colors.orange[100], borderRadius: BorderRadius.circular(12)),
+                              child: Text(r.status.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: r.status == 'taken' ? Colors.green[800] : Colors.orange[800]))
+                            )),
+                            DataCell(Text(r.slot)),
+                            DataCell(Text(r.adminName, style: const TextStyle(fontStyle: FontStyle.italic))),
+                          ])).toList(),
+                        ),
+                      ),
+                    ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -26,8 +26,7 @@ class Medication {
     DateTime? actionTime;
     if (data['lastActionAt'] != null) {
       actionTime = (data['lastActionAt'] as Timestamp).toDate();
-    } 
-    else if (data['lastSkippedAt'] != null) {
+    } else if (data['lastSkippedAt'] != null) {
       actionTime = DateTime.tryParse(data['lastSkippedAt'].toString());
     } else if (data['lastTakenAt'] != null) {
       actionTime = DateTime.tryParse(data['lastTakenAt'].toString());
@@ -45,12 +44,14 @@ class Medication {
 class AlarmModel {
   String? id;
   String timeOfDay;
+  String type; // 'Breakfast', 'Lunch', 'Dinner'
   bool isActive;
   List<Medication> medications;
 
   AlarmModel({
     this.id,
     required this.timeOfDay,
+    this.type = 'Breakfast',
     this.isActive = true,
     required this.medications,
   });
@@ -63,6 +64,7 @@ class AlarmModel {
     return AlarmModel(
       id: id,
       timeOfDay: data['timeOfDay'] ?? "00:00",
+      type: data['type'] ?? 'Breakfast',
       isActive: data['isActive'] ?? true,
       medications: meds,
     );
@@ -76,17 +78,21 @@ class Patient {
   String? id;
   String name;
   int age;
-  String slotNumber;
+  int patientNumber; // 1 to 8
   String gender;
+  String createdBy; // Admin Name
   List<AlarmModel> alarms;
+  Map<String, int> slotInventory; // Key: Slot Number, Value: Count (Max 3)
 
   Patient({
     this.id,
     required this.name,
     required this.age,
-    required this.slotNumber,
+    required this.patientNumber,
     required this.gender,
+    required this.createdBy,
     required this.alarms,
+    required this.slotInventory,
   });
 
   factory Patient.fromMap(
@@ -98,11 +104,46 @@ class Patient {
       id: id,
       name: data['name'] ?? 'Unknown',
       age: data['age'] ?? 0,
-      slotNumber: data['slotNumber']?.toString() ?? '0',
+      patientNumber: data['patientNumber'] ?? 0,
       gender: data['gender'] ?? 'N/A',
+      createdBy: data['createdBy'] ?? 'Unknown',
+      slotInventory: Map<String, int>.from(data['slotInventory'] ?? {}),
       alarms: alarms,
     );
   }
+  
+  // Helper to get slots as a string list for UI display
+  String get assignedSlots {
+    List<String> slots = [];
+    if (patientNumber <= 4) {
+      slots = [patientNumber.toString(), (patientNumber + 4).toString(), (patientNumber + 8).toString()];
+    } else {
+      slots = [(patientNumber + 8).toString(), (patientNumber + 12).toString(), (patientNumber + 16).toString()];
+    }
+    return slots.join(', ');
+  }
+
+  String get slotNumber => assignedSlots; // Alias for backward compatibility if needed
+}
+
+class HistoryRecord {
+  final String patientName;
+  final int patientNumber;
+  final String medicationName;
+  final String status;
+  final String adminName; // Created By
+  final DateTime actionTime;
+  final String slot;
+
+  HistoryRecord({
+    required this.patientName,
+    required this.patientNumber,
+    required this.medicationName,
+    required this.status,
+    required this.adminName,
+    required this.actionTime,
+    required this.slot,
+  });
 }
 
 // ================== DATABASE SERVICE ==================
@@ -114,50 +155,82 @@ class FirestoreService {
   Stream<List<Patient>> getPatients() {
     return _db
         .collection('patients')
-        .orderBy('slotNumber')
+        .orderBy('patientNumber')
         .snapshots()
         .asyncMap((snapshot) async {
-          List<Patient> patients = [];
-          for (var doc in snapshot.docs) {
-            final pData = doc.data();
-            final alarmSnaps = await doc.reference.collection('alarms').get();
-            List<AlarmModel> alarms = [];
+      List<Patient> patients = [];
+      for (var doc in snapshot.docs) {
+        final pData = doc.data();
+        final alarmSnaps = await doc.reference.collection('alarms').get();
+        List<AlarmModel> alarms = [];
 
-            for (var aDoc in alarmSnaps.docs) {
-              final aData = aDoc.data();
-              final medSnaps = await aDoc.reference
-                  .collection('medications')
-                  .get();
-              final meds = medSnaps.docs
-                  .map((m) => Medication.fromMap(m.data(), m.id))
-                  .toList();
-              alarms.add(AlarmModel.fromMap(aData, aDoc.id, meds));
-            }
-            patients.add(Patient.fromMap(pData, doc.id, alarms));
-          }
-          return patients;
-        });
+        for (var aDoc in alarmSnaps.docs) {
+          final aData = aDoc.data();
+          final medSnaps = await aDoc.reference.collection('medications').get();
+          final meds = medSnaps.docs
+              .map((m) => Medication.fromMap(m.data(), m.id))
+              .toList();
+          alarms.add(AlarmModel.fromMap(aData, aDoc.id, meds));
+        }
+        patients.add(Patient.fromMap(pData, doc.id, alarms));
+      }
+      return patients;
+    });
   }
 
-  // --- 2. Add Data ---
+  // --- 2. Add Data (Auto Assign 1-8) ---
   Future<void> addPatient(
     String name,
     int age,
-    String slot,
     String gender,
+    String adminName,
     List<AlarmModel> alarms,
   ) async {
+    // Determine next available Patient Number (1-8)
+    final snapshot = await _db.collection('patients').get();
+    Set<int> usedNumbers = snapshot.docs.map((d) => d.data()['patientNumber'] as int).toSet();
+    
+    int nextNum = -1;
+    for (int i = 1; i <= 8; i++) {
+      if (!usedNumbers.contains(i)) {
+        nextNum = i;
+        break;
+      }
+    }
+
+    if (nextNum == -1) {
+      throw Exception("Max 8 patients reached. Delete a patient to add a new one.");
+    }
+
+    // Calculate Slots based on your mapping
+    List<String> mySlots = [];
+    if (nextNum <= 4) {
+      mySlots = [nextNum.toString(), (nextNum + 4).toString(), (nextNum + 8).toString()];
+    } else {
+      mySlots = [(nextNum + 8).toString(), (nextNum + 12).toString(), (nextNum + 16).toString()];
+    }
+
+    // Initialize Inventory (3 boxes per slot)
+    Map<String, int> initialInventory = {
+      mySlots[0]: 3,
+      mySlots[1]: 3,
+      mySlots[2]: 3,
+    };
+
     DocumentReference pRef = await _db.collection('patients').add({
       'name': name,
       'age': age,
-      'slotNumber': slot,
+      'patientNumber': nextNum,
       'gender': gender,
+      'createdBy': adminName,
+      'slotInventory': initialInventory,
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
     for (var alarm in alarms) {
       DocumentReference aRef = await pRef.collection('alarms').add({
         'timeOfDay': alarm.timeOfDay,
+        'type': alarm.type,
         'isActive': true,
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -177,7 +250,6 @@ class FirestoreService {
     Patient patient,
     String name,
     int age,
-    String slot,
     String gender,
     List<AlarmModel> newAlarms,
   ) async {
@@ -186,12 +258,11 @@ class FirestoreService {
     await pRef.update({
       'name': name,
       'age': age,
-      'slotNumber': slot,
       'gender': gender,
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    // Simple strategy: delete old alarms and re-add new ones
+    // Replace alarms (simplistic approach: delete old, add new)
     final oldAlarms = await pRef.collection('alarms').get();
     for (var doc in oldAlarms.docs) {
       final meds = await doc.reference.collection('medications').get();
@@ -202,6 +273,7 @@ class FirestoreService {
     for (var alarm in newAlarms) {
       DocumentReference aRef = await pRef.collection('alarms').add({
         'timeOfDay': alarm.timeOfDay,
+        'type': alarm.type,
         'isActive': true,
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -216,259 +288,190 @@ class FirestoreService {
     }
   }
 
-  // --- 4. Delete Data ---
   Future<void> deletePatient(String id) async {
     await _db.collection('patients').doc(id).delete();
   }
 
-  // --- 5. Record Action (History + Status Update) - FIXED ---
+  // --- Inventory Refill ---
+  Future<void> refillSlot(String patientId, String slotNumber) async {
+    await _db.collection('patients').doc(patientId).update({
+      'slotInventory.$slotNumber': 3, // Reset to Max
+    });
+  }
+
+  // --- Action Recording with Inventory Decrement ---
+  Future<void> markTaken(String pId, String aId, List<Medication> meds) async {
+    final pRef = _db.collection('patients').doc(pId);
+    final pSnap = await pRef.get();
+    final pData = pSnap.data();
+
+    // Determine slot based on alarm Type and Patient Number
+    final aSnap = await pRef.collection('alarms').doc(aId).get();
+    final aData = aSnap.data();
+    String type = aData?['type'] ?? 'Breakfast';
+    int pNum = pData?['patientNumber'] ?? 0;
+    
+    // Logic to find slot from Type + PatientNum mapping
+    String targetSlot = "0";
+    if (pNum <= 4) {
+      if (type == 'Breakfast') targetSlot = pNum.toString();
+      else if (type == 'Lunch') targetSlot = (pNum + 4).toString();
+      else if (type == 'Dinner') targetSlot = (pNum + 8).toString();
+    } else {
+      if (type == 'Breakfast') targetSlot = (pNum + 8).toString();
+      else if (type == 'Lunch') targetSlot = (pNum + 12).toString();
+      else if (type == 'Dinner') targetSlot = (pNum + 16).toString();
+    }
+
+    // Decrement Inventory
+    if (pData != null && pData['slotInventory'] != null) {
+      Map<String, dynamic> inv = pData['slotInventory'];
+      int current = inv[targetSlot] ?? 0;
+      if (current > 0) {
+        await pRef.update({'slotInventory.$targetSlot': current - 1});
+      }
+    }
+
+    await _recordAction(pId, aId, meds, 'taken', targetSlot, pData?['createdBy'] ?? 'Unknown');
+  }
+
+  Future<void> markSkipped(String pId, String aId, List<Medication> meds) async {
+     // Skipped does not decrement inventory
+    await _recordAction(pId, aId, meds, 'skipped', 'N/A', 'N/A');
+  }
+
   Future<void> _recordAction(
     String patientId,
     String alarmId,
     List<Medication> meds,
     String status,
+    String slotUsed,
+    String adminName,
   ) async {
-    try {
-      final now = DateTime.now();
-      final dateStr = DateFormat('yyyy-MM-dd').format(now);
-      final timeStr = DateFormat('HH:mm').format(now);
-      
-      print("🔥 Recording action: Patient=$patientId, Alarm=$alarmId, Status=$status");
-      print("🔥 Medications: ${meds.map((m) => '${m.name}(id:${m.id})').join(', ')}");
-      
-      // 1. Update Status in Alarm's Medication Subcollection
-      final alarmRef = _db
-          .collection('patients')
-          .doc(patientId)
-          .collection('alarms')
-          .doc(alarmId);
-      
-      final medsSnapshot = await alarmRef.collection('medications').get();
-      
-      for (var medDoc in medsSnapshot.docs) {
-        final medData = medDoc.data();
-        final medName = medData['name'];
-        
-        // Check if this medication is in the list
-        if (meds.any((m) => m.name == medName)) {
-          await medDoc.reference.update({
-            'status': status,
-            'lastActionAt': FieldValue.serverTimestamp(),
-          });
-          print("✅ Updated medication status: $medName -> $status");
-        }
-      }
+    final now = DateTime.now();
+    final dateStr = DateFormat('yyyy-MM-dd').format(now);
+    final timeStr = DateFormat('HH:mm').format(now);
 
-      // 2. Add to History Collection (for Reports)
-      final historyRef = _db
-          .collection('patients')
-          .doc(patientId)
-          .collection('history');
-      
-      for (var med in meds) {
-        await historyRef.add({
-          'medicationName': med.name,
-          'status': status, // 'taken' or 'skipped'
-          'actionTime': FieldValue.serverTimestamp(),
-          'date': dateStr, // For filtering by date
-          'time': timeStr, // Human-readable time
-          'alarmId': alarmId,
+    // Update Status in Subcollection (for Dashboard Chart)
+    final alarmRef = _db.collection('patients').doc(patientId).collection('alarms').doc(alarmId);
+    final medsSnapshot = await alarmRef.collection('medications').get();
+    
+    for (var medDoc in medsSnapshot.docs) {
+      if (meds.any((m) => m.name == medDoc['name'])) {
+        await medDoc.reference.update({
+          'status': status,
+          'lastActionAt': FieldValue.serverTimestamp(),
         });
-        print("✅ Added to history: ${med.name} -> $status at $timeStr");
       }
-      
-      print("🎉 Action recorded successfully!");
-      
-    } catch (e) {
-      print("❌ Error recording action: $e");
-      rethrow;
+    }
+
+    // Add to History (for PDF Reports)
+    final historyRef = _db.collection('patients').doc(patientId).collection('history');
+    for (var med in meds) {
+      await historyRef.add({
+        'medicationName': med.name,
+        'status': status,
+        'actionTime': FieldValue.serverTimestamp(),
+        'date': dateStr,
+        'time': timeStr,
+        'slot': slotUsed,
+        'adminName': adminName, // Recorded here for report
+        'alarmId': alarmId,
+      });
     }
   }
 
-  Future<void> markSkipped(String pId, String aId, List<Medication> meds) async {
-    await _recordAction(pId, aId, meds, 'skipped');
+  // --- 6. Fetch History for Reports (Enhanced) ---
+  Future<List<HistoryRecord>> getHistory(DateTime? date) async {
+    List<HistoryRecord> records = [];
+    String? targetDateStr = date != null ? DateFormat('yyyy-MM-dd').format(date) : null;
+
+    final patientsSnap = await _db.collection('patients').get();
+    
+    for (var pDoc in patientsSnap.docs) {
+      final pData = pDoc.data();
+      Query historyQuery = pDoc.reference.collection('history');
+      
+      if (targetDateStr != null) {
+        historyQuery = historyQuery.where('date', isEqualTo: targetDateStr);
+      }
+
+      final historySnap = await historyQuery.get();
+      for (var hDoc in historySnap.docs) {
+        final hData = hDoc.data() as Map<String, dynamic>;
+        records.add(HistoryRecord(
+          patientName: pData['name'],
+          patientNumber: pData['patientNumber'],
+          medicationName: hData['medicationName'] ?? '-',
+          status: hData['status'] ?? 'UNKNOWN',
+          adminName: pData['createdBy'] ?? 'Unknown',
+          slot: hData['slot'] ?? '-',
+          actionTime: (hData['actionTime'] as Timestamp).toDate(),
+        ));
+      }
+    }
+    return records;
   }
 
-  Future<void> markTaken(String pId, String aId, List<Medication> meds) async {
-    await _recordAction(pId, aId, meds, 'taken');
-  }
-
-  // --- 6. PDF Generation (Updated for Date Range) ---
-  Future<void> generateReport(
-    List<Patient> patients,
+  // --- PDF Generation (Updated) ---
+  Future<void> generatePdfReport(
+    List<HistoryRecord> records,
     BuildContext context,
-    DateTime selectedDate,
+    DateTime date,
   ) async {
-    final scaffoldMessenger = ScaffoldMessenger.of(context);
-    final String dateStr = DateFormat('yyyy-MM-dd').format(selectedDate);
-    final String displayDate = DateFormat('MMMM d, yyyy').format(selectedDate);
-    final String fileName = 'PillPal_Report_$dateStr.pdf';
+    final pdf = pw.Document();
+    final String dateStr = DateFormat('MMMM d, yyyy').format(date);
+    
+    // Sort logic handled in UI, but we can double check here or just print
+    List<List<String>> tableData = records.map((r) => [
+      r.patientName,
+      r.patientNumber.toString(),
+      r.medicationName,
+      DateFormat('HH:mm').format(r.actionTime),
+      r.status.toUpperCase(),
+      r.adminName,
+    ]).toList();
 
-    try {
-      final pdf = pw.Document();
-      
-      // Fetch history data for each patient for the selected date
-      List<List<String>> historyRows = [];
-
-      for (var p in patients) {
-        // Fetch without orderBy to avoid needing composite index
-        final historySnap = await _db
-            .collection('patients')
-            .doc(p.id)
-            .collection('history')
-            .where('date', isEqualTo: dateStr)
-            .get();
-        
-        // Sort in memory by time string
-        final sortedDocs = historySnap.docs.toList()
-          ..sort((a, b) {
-            final timeA = a.data()['time'] ?? '00:00';
-            final timeB = b.data()['time'] ?? '00:00';
-            return timeA.compareTo(timeB);
-          });
-
-        if (sortedDocs.isNotEmpty) {
-          for (var doc in sortedDocs) {
-            final data = doc.data();
-            String time = data['time'] ?? "Unknown";
-            
-            // Fallback if 'time' field doesn't exist
-            if (time == "Unknown" && data['actionTime'] != null) {
-              time = DateFormat('HH:mm').format((data['actionTime'] as Timestamp).toDate());
-            }
-            
-            String statusDisplay = (data['status'] ?? 'UNKNOWN').toString().toUpperCase();
-            
-            historyRows.add([
-              p.name,
-              p.slotNumber,
-              data['medicationName'] ?? '-',
-              time,
-              statusDisplay,
-            ]);
-          }
-        }
-      }
-
-      pdf.addPage(
-        pw.MultiPage(
-          pageFormat: PdfPageFormat.a4,
-          build: (pw.Context context) {
-            return [
-              pw.Header(
-                level: 0,
-                child: pw.Row(
-                  mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                  children: [
-                    pw.Text(
-                      'PillPal Daily Report',
-                      style: pw.TextStyle(
-                        fontSize: 24,
-                        fontWeight: pw.FontWeight.bold,
-                        color: PdfColor.fromHex('1565C0')
-                      )
-                    ),
-                    pw.Text(displayDate, style: const pw.TextStyle(fontSize: 14)),
-                  ]
-                )
-              ),
-              pw.SizedBox(height: 20),
-              
-              if (historyRows.isEmpty)
-                pw.Center(
-                  child: pw.Padding(
-                    padding: const pw.EdgeInsets.all(40),
-                    child: pw.Text(
-                      "No medication activity recorded for this date.",
-                      style: const pw.TextStyle(fontSize: 14, color: PdfColors.grey600)
-                    )
-                  )
-                )
-              else
-                pw.Table.fromTextArray(
-                  headers: ['Patient Name', 'Slot', 'Medication', 'Time', 'Status'],
-                  data: historyRows,
-                  border: pw.TableBorder.all(color: PdfColors.grey300),
-                  headerStyle: pw.TextStyle(
-                    fontWeight: pw.FontWeight.bold,
-                    color: PdfColors.white,
-                    fontSize: 11
-                  ),
-                  headerDecoration: pw.BoxDecoration(
-                    color: PdfColor.fromHex('1565C0')
-                  ),
-                  cellAlignment: pw.Alignment.centerLeft,
-                  cellAlignments: {
-                    1: pw.Alignment.center,
-                    3: pw.Alignment.center,
-                    4: pw.Alignment.center,
-                  },
-                  cellStyle: const pw.TextStyle(fontSize: 10),
-                ),
-                
-              pw.SizedBox(height: 20),
-              pw.Divider(),
-              pw.SizedBox(height: 10),
-              pw.Row(
-                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                children: [
-                  pw.Text(
-                    "Total Patients Monitored: ${patients.length}",
-                    style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)
-                  ),
-                  pw.Text(
-                    "Total Records: ${historyRows.length}",
-                    style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey)
-                  ),
-                ]
-              ),
-            ];
-          },
-        ),
-      );
-
-      // Save File
-      String path;
-      if (Platform.isAndroid) {
-        final directory = await getExternalStorageDirectory();
-        path = directory?.path ?? "";
-        if (path.contains("Android")) {
-            path = path.split("Android")[0] + "Download";
-        }
-      } else {
-        final directory = await getApplicationDocumentsDirectory();
-        path = directory.path;
-      }
-      
-      final file = File('$path/$fileName');
-      if (!await Directory(path).exists()) {
-        await Directory(path).create(recursive: true);
-      }
-      await file.writeAsBytes(await pdf.save());
-
-      if (context.mounted) {
-        scaffoldMessenger.showSnackBar(
-          SnackBar(
-            content: Text("Report saved: $fileName"),
-            backgroundColor: Colors.green,
-            action: SnackBarAction(
-              label: 'Open',
-              textColor: Colors.white,
-              onPressed: () => OpenFilex.open(file.path),
+    pdf.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        build: (pw.Context context) {
+          return [
+            pw.Header(level: 0, child: pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+              pw.Text('Daily Medication Report', style: pw.TextStyle(fontSize: 24, fontWeight: pw.FontWeight.bold, color: PdfColor.fromHex('1565C0'))),
+              pw.Text(dateStr),
+            ])),
+            pw.SizedBox(height: 20),
+            pw.Table.fromTextArray(
+              headers: ['Patient', 'No.', 'Medication', 'Time', 'Status', 'Admin/Nurse'],
+              data: tableData,
+              headerDecoration: pw.BoxDecoration(color: PdfColor.fromHex('1565C0')),
+              headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold),
+              cellAlignment: pw.Alignment.centerLeft,
             ),
-          ),
-        );
-      }
-    } catch (e) {
-      print("PDF Error: $e");
-      if (context.mounted) {
-        scaffoldMessenger.showSnackBar(
-          SnackBar(
-            content: Text("Error: $e"),
-            backgroundColor: Colors.red
-          )
-        );
-      }
+             pw.SizedBox(height: 20),
+             pw.Text("Generated by PillPal System", style: const pw.TextStyle(color: PdfColors.grey)),
+          ];
+        },
+      ),
+    );
+
+    // Save File
+    String path;
+    if (Platform.isAndroid) {
+      final directory = await getExternalStorageDirectory();
+      path = directory?.path ?? "";
+      if (path.contains("Android")) path = path.split("Android")[0] + "Download";
+    } else {
+      final directory = await getApplicationDocumentsDirectory();
+      path = directory.path;
+    }
+    final file = File('$path/PillPal_Report_${DateFormat('yyyyMMdd').format(date)}.pdf');
+    if (!await Directory(path).exists()) await Directory(path).create(recursive: true);
+    await file.writeAsBytes(await pdf.save());
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Saved to $path"), action: SnackBarAction(label: 'Open', onPressed: () => OpenFilex.open(file.path))));
     }
   }
 }
