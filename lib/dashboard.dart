@@ -4,7 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'services.dart';
-import 'main.dart'; // To access flutterLocalNotificationsPlugin
+import 'main.dart'; 
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -17,7 +17,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   String _adminName = "Admin";
-  Set<String> _notifiedSlots = {}; // To prevent spamming notifications for the same low slot
+  Set<String> _notifiedSlots = {};
 
   @override
   void initState() {
@@ -28,19 +28,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  // --- REFILL & NOTIFICATION LOGIC ---
   void _checkInventoryLevels(List<Patient> patients) {
     for (var p in patients) {
       p.slotInventory.forEach((slot, count) {
         String key = "${p.id}_$slot";
-        
-        // If Low Stock (<= 1) and not yet notified this session
         if (count <= 1 && !_notifiedSlots.contains(key)) {
           _showLowStockNotification(p.name, slot, count);
           _notifiedSlots.add(key);
-        } 
-        // If refilled (count > 1), remove from notified set so we can notify again later
-        else if (count > 1 && _notifiedSlots.contains(key)) {
+        } else if (count > 1 && _notifiedSlots.contains(key)) {
           _notifiedSlots.remove(key);
         }
       });
@@ -56,8 +51,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       playSound: true,
     );
     const NotificationDetails details = NotificationDetails(android: androidDetails);
-    
-    // Only send to the device where this admin is logged in (implicit by running on this device)
     await flutterLocalNotificationsPlugin.show(
       DateTime.now().millisecond,
       "Refill Warning!",
@@ -95,7 +88,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text("$count/3 Boxes", style: TextStyle(color: isLow ? Colors.red : Colors.black, fontWeight: FontWeight.bold)),
+                        Text("$count/3", style: TextStyle(color: isLow ? Colors.red : Colors.black, fontWeight: FontWeight.bold)),
                         const SizedBox(width: 10),
                         ElevatedButton(
                           onPressed: () {
@@ -118,8 +111,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
     );
   }
-
-  // --- DIALOGS & NAVIGATION ---
 
   void _confirmLogout() {
     showDialog(
@@ -169,9 +160,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (context, setState) {
             bool isSaving = false;
 
-            // --- KEY LOGIC UPDATE FOR UI DISPLAY ---
             String getSlotForType(String type, int pNum) {
-               if (!isEditing && pNum == 0) return "Auto-Assigned";
+               if (!isEditing && pNum == 0) return "Auto";
                
                if (pNum <= 4) {
                  if (type == 'Breakfast') return pNum.toString();
@@ -241,13 +231,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onChanged: (v) => gender = v!,
                         ),
                         const SizedBox(height: 10),
+                        if (isEditing)
                         Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)),
-                          child: Text(isEditing 
-                            ? "Patient #${patientToEdit!.patientNumber} - Assigned Slots: ${patientToEdit.assignedSlots}"
-                            : "Patient Number & Slots will be auto-assigned (1-8) upon saving.",
-                            style: const TextStyle(fontSize: 12, color: Colors.black54)
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            icon: const Icon(Icons.delete),
+                            label: const Text("Delete Patient"),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _confirmDelete(patientToEdit!.id!, patientToEdit.name);
+                            },
                           ),
                         ),
                         const Divider(height: 30),
@@ -272,7 +266,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         value: alarm['type'],
                                         items: ["Breakfast", "Lunch", "Dinner"].map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
                                         onChanged: (v) => setState(() => alarm['type'] = v),
-                                        decoration: const InputDecoration(labelText: "Meal/Type", isDense: true, border: InputBorder.none),
+                                        decoration: const InputDecoration(labelText: "Meal", isDense: true),
                                       ),
                                     ),
                                     const SizedBox(width: 10),
@@ -289,12 +283,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     ),
                                     IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => setState(() => tempAlarms.removeAt(index))),
                                   ]),
-                                  const Divider(),
                                   Align(
                                     alignment: Alignment.centerLeft,
                                     child: Text("Target Slot: ${getSlotForType(alarm['type'], isEditing ? patientToEdit!.patientNumber : 0)}", style: const TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold)),
                                   ),
-                                  const SizedBox(height: 5),
                                   Wrap(spacing: 6, children: [
                                     ...(alarm['meds'] as List<String>).map((m) => Chip(label: Text(m), backgroundColor: Colors.white, onDeleted: () => setState(() => (alarm['meds'] as List<String>).remove(m)))),
                                     ActionChip(label: const Text("+ Med"), backgroundColor: Colors.white, onPressed: () => addMedication(index)),
@@ -340,8 +332,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       }
                     }
                   },
-                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white),
-                  child: isSaving ? const CircularProgressIndicator(color: Colors.white) : const Text("Save"),
+                  child: isSaving ? const CircularProgressIndicator() : const Text("Save"),
                 ),
               ],
             );
@@ -356,7 +347,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Delete Patient"),
-        content: Text("Are you sure you want to remove $name?"),
+        content: Text("Are you sure you want to remove $name? This cannot be undone."),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel")),
           ElevatedButton(
@@ -364,6 +355,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             onPressed: () {
               _db.deletePatient(id);
               Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Patient Deleted")));
             },
             child: const Text("Delete"),
           ),
@@ -373,7 +365,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildStatsPage(List<Patient> patients) {
-    // Check inventory levels every time the stats page rebuilds (or updates)
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkInventoryLevels(patients));
 
     int takenCount = 0;
@@ -400,7 +391,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text("Overview", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              // Refill Button
               IconButton(onPressed: () => _showRefillDialog(patients), icon: const Icon(Icons.inventory, color: Color(0xFF1565C0), size: 30)),
             ],
           ),
@@ -418,7 +408,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           const SizedBox(height: 30),
           Expanded(
-            child: isEmpty ? const Center(child: Text("No Data Available")) : PieChart(
+            child: isEmpty ? const Center(child: Text("No Data")) : PieChart(
               PieChartData(
                 sections: [
                    PieChartSectionData(value: takenCount.toDouble(), color: Colors.green, radius: 30, showTitle: false),
@@ -431,8 +421,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           const SizedBox(height: 20),
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-             CircleAvatar(radius: 6, backgroundColor: Colors.green), const SizedBox(width: 5), Text("Taken ($takenCount)"), const SizedBox(width: 15),
-             CircleAvatar(radius: 6, backgroundColor: Colors.orange), const SizedBox(width: 5), Text("Skipped ($skippedCount)"),
+             CircleAvatar(radius: 6, backgroundColor: Colors.green), const SizedBox(width: 5), Text("Taken"), const SizedBox(width: 15),
+             CircleAvatar(radius: 6, backgroundColor: Colors.orange), const SizedBox(width: 5), Text("Skipped"),
           ]),
         ],
       ),
@@ -454,14 +444,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             contentPadding: const EdgeInsets.all(16),
             leading: CircleAvatar(radius: 25, backgroundColor: const Color(0xFFE3F2FD), child: Text("${p.patientNumber}", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Color(0xFF1565C0)))),
             title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text("Age: ${p.age} • ${p.gender}"),
-                Text("Assigned Slots: ${p.assignedSlots}", style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                Text("Created By: ${p.createdBy}", style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic)),
-              ],
-            ),
+            subtitle: Text("Age: ${p.age} • ${p.gender}\nSlots: ${p.assignedSlots}"),
             trailing: IconButton(icon: const Icon(Icons.edit, color: Colors.grey), onPressed: () => _showPatientDialog(patientToEdit: p)),
             onLongPress: () => _confirmDelete(p.id!, p.name),
           ),
@@ -517,12 +500,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 }
 
-// ================== NEW HISTORY SCREEN ==================
-
 class HistoryScreen extends StatefulWidget {
   final FirestoreService db;
   const HistoryScreen({super.key, required this.db});
-
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
 }
@@ -565,16 +545,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   void _onSort(String column) {
     if (_sortColumn == column) {
-      setState(() {
-        _sortAsc = !_sortAsc;
-        _sortRecords();
-      });
+      setState(() { _sortAsc = !_sortAsc; _sortRecords(); });
     } else {
-      setState(() {
-        _sortColumn = column;
-        _sortAsc = true;
-        _sortRecords();
-      });
+      setState(() { _sortColumn = column; _sortAsc = true; _sortRecords(); });
     }
   }
 
@@ -611,7 +584,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 },
               ),
               const Spacer(),
-              const Text("Sort by: ", style: TextStyle(fontSize: 12)),
+              const Text("Sort: ", style: TextStyle(fontSize: 12)),
               DropdownButton<String>(
                 value: _sortColumn,
                 style: const TextStyle(fontSize: 12, color: Colors.black),
@@ -624,36 +597,38 @@ class _HistoryScreenState extends State<HistoryScreen> {
             child: _isLoading 
               ? const Center(child: CircularProgressIndicator()) 
               : _records.isEmpty 
-                  ? const Center(child: Text("No records found for this date."))
+                  ? const Center(child: Text("No records."))
                   : SingleChildScrollView(
                       scrollDirection: Axis.vertical,
                       child: SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
                         child: DataTable(
-                          sortColumnIndex: ['Patient Name', 'Patient No.', 'Medication', 'Time', 'Status', 'Slot', 'Admin'].indexOf(_sortColumn) == -1 ? 3 : ['Patient Name', 'Patient No.', 'Medication', 'Time', 'Status', 'Slot', 'Admin'].indexOf(_sortColumn),
+                          sortColumnIndex: ['Patient Name', 'Patient No.', 'Medication', 'Meal', 'Slot', 'Time', 'Status', 'Admin'].indexOf(_sortColumn) == -1 ? 5 : ['Patient Name', 'Patient No.', 'Medication', 'Meal', 'Slot', 'Time', 'Status', 'Admin'].indexOf(_sortColumn),
                           sortAscending: _sortAsc,
                           headingRowColor: MaterialStateProperty.all(Colors.blue[50]),
                           columns: [
                             DataColumn(label: const Text("Patient"), onSort: (_,__) => _onSort('Patient Name')),
                             DataColumn(label: const Text("No."), numeric: true, onSort: (_,__) => _onSort('Patient No.')),
                             const DataColumn(label: Text("Medication")),
+                            const DataColumn(label: Text("Meal")), // <--- NEW COLUMN
+                            const DataColumn(label: Text("Slot")),
                             DataColumn(label: const Text("Time"), onSort: (_,__) => _onSort('Time')),
                             const DataColumn(label: Text("Status")),
-                            const DataColumn(label: Text("Slot")),
                             DataColumn(label: const Text("Admin"), onSort: (_,__) => _onSort('Admin')),
                           ],
                           rows: _records.map((r) => DataRow(cells: [
                             DataCell(Text(r.patientName)),
                             DataCell(Text(r.patientNumber.toString())),
                             DataCell(Text(r.medicationName)),
+                            DataCell(Text(r.mealType)), // <--- SHOW MEAL TYPE
+                            DataCell(Text(r.slot)),
                             DataCell(Text(DateFormat('HH:mm').format(r.actionTime))),
                             DataCell(Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(color: r.status == 'taken' ? Colors.green[100] : Colors.orange[100], borderRadius: BorderRadius.circular(12)),
                               child: Text(r.status.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: r.status == 'taken' ? Colors.green[800] : Colors.orange[800]))
                             )),
-                            DataCell(Text(r.slot)),
-                            DataCell(Text(r.adminName, style: const TextStyle(fontStyle: FontStyle.italic))),
+                            DataCell(Text(r.adminName)),
                           ])).toList(),
                         ),
                       ),

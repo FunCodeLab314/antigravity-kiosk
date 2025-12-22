@@ -45,6 +45,7 @@ class AlarmModel {
   String? id;
   String timeOfDay;
   String type; // 'Breakfast', 'Lunch', 'Dinner'
+  String? slotNumber; // SPECIFIC slot for this alarm (e.g., "1")
   bool isActive;
   List<Medication> medications;
 
@@ -52,6 +53,7 @@ class AlarmModel {
     this.id,
     required this.timeOfDay,
     this.type = 'Breakfast',
+    this.slotNumber,
     this.isActive = true,
     required this.medications,
   });
@@ -65,6 +67,7 @@ class AlarmModel {
       id: id,
       timeOfDay: data['timeOfDay'] ?? "00:00",
       type: data['type'] ?? 'Breakfast',
+      slotNumber: data['slotNumber'], // Load specific slot from DB
       isActive: data['isActive'] ?? true,
       medications: meds,
     );
@@ -82,7 +85,7 @@ class Patient {
   String gender;
   String createdBy; // Admin Name
   List<AlarmModel> alarms;
-  Map<String, int> slotInventory; // Key: Slot Number, Value: Count (Max 3)
+  Map<String, int> slotInventory; 
 
   Patient({
     this.id,
@@ -112,20 +115,15 @@ class Patient {
     );
   }
   
-  // Helper to get slots as a string list for UI display
   String get assignedSlots {
     List<String> slots = [];
     if (patientNumber <= 4) {
-      // Patients 1-4: P#, P#+4, P#+8
       slots = [patientNumber.toString(), (patientNumber + 4).toString(), (patientNumber + 8).toString()];
     } else {
-      // Patients 5-8: P#+8, P#+12, P#+16
       slots = [(patientNumber + 8).toString(), (patientNumber + 12).toString(), (patientNumber + 16).toString()];
     }
     return slots.join(', ');
   }
-
-  String get slotNumber => assignedSlots; // Alias for backward compatibility if needed
 }
 
 class HistoryRecord {
@@ -133,9 +131,10 @@ class HistoryRecord {
   final int patientNumber;
   final String medicationName;
   final String status;
-  final String adminName; // Created By
+  final String adminName;
   final DateTime actionTime;
   final String slot;
+  final String mealType; // Breakfast/Lunch/Dinner
 
   HistoryRecord({
     required this.patientName,
@@ -145,6 +144,7 @@ class HistoryRecord {
     required this.adminName,
     required this.actionTime,
     required this.slot,
+    required this.mealType,
   });
 }
 
@@ -152,6 +152,21 @@ class HistoryRecord {
 
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  // --- Helper: Slot Calculation ---
+  // Calculates specific slot based on Patient Number + Meal Type
+  String _calculateSlot(int pNum, String type) {
+    if (pNum <= 4) {
+      if (type == 'Breakfast') return pNum.toString();
+      if (type == 'Lunch') return (pNum + 4).toString();
+      if (type == 'Dinner') return (pNum + 8).toString();
+    } else {
+      if (type == 'Breakfast') return (pNum + 8).toString();
+      if (type == 'Lunch') return (pNum + 12).toString();
+      if (type == 'Dinner') return (pNum + 16).toString();
+    }
+    return "0";
+  }
 
   // --- 1. Fetch All Data ---
   Stream<List<Patient>> getPatients() {
@@ -180,7 +195,7 @@ class FirestoreService {
     });
   }
 
-  // --- 2. Add Data (Auto Assign 1-8) ---
+  // --- 2. Add Data ---
   Future<void> addPatient(
     String name,
     int age,
@@ -188,7 +203,6 @@ class FirestoreService {
     String adminName,
     List<AlarmModel> alarms,
   ) async {
-    // Determine next available Patient Number (1-8)
     final snapshot = await _db.collection('patients').get();
     Set<int> usedNumbers = snapshot.docs.map((d) => d.data()['patientNumber'] as int).toSet();
     
@@ -204,21 +218,16 @@ class FirestoreService {
       throw Exception("Max 8 patients reached. Delete a patient to add a new one.");
     }
 
-    // Calculate Slots based on mapping
+    // Init Inventory
     List<String> mySlots = [];
     if (nextNum <= 4) {
-      // 1 -> 1, 5, 9
       mySlots = [nextNum.toString(), (nextNum + 4).toString(), (nextNum + 8).toString()];
     } else {
-      // 5 -> 13, 17, 21
       mySlots = [(nextNum + 8).toString(), (nextNum + 12).toString(), (nextNum + 16).toString()];
     }
 
-    // Initialize Inventory (3 boxes per slot)
     Map<String, int> initialInventory = {
-      mySlots[0]: 3,
-      mySlots[1]: 3,
-      mySlots[2]: 3,
+      mySlots[0]: 3, mySlots[1]: 3, mySlots[2]: 3,
     };
 
     DocumentReference pRef = await _db.collection('patients').add({
@@ -232,9 +241,13 @@ class FirestoreService {
     });
 
     for (var alarm in alarms) {
+      // CALC & SAVE SLOT NUMBER IN ALARM
+      String specificSlot = _calculateSlot(nextNum, alarm.type);
+      
       DocumentReference aRef = await pRef.collection('alarms').add({
         'timeOfDay': alarm.timeOfDay,
         'type': alarm.type,
+        'slotNumber': specificSlot, // <--- SAVED TO DB
         'isActive': true,
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -266,7 +279,6 @@ class FirestoreService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    // Replace alarms (simplistic approach: delete old, add new)
     final oldAlarms = await pRef.collection('alarms').get();
     for (var doc in oldAlarms.docs) {
       final meds = await doc.reference.collection('medications').get();
@@ -275,9 +287,13 @@ class FirestoreService {
     }
 
     for (var alarm in newAlarms) {
+      // CALC SLOT BASED ON EXISTING PATIENT NUMBER
+      String specificSlot = _calculateSlot(patient.patientNumber, alarm.type);
+
       DocumentReference aRef = await pRef.collection('alarms').add({
         'timeOfDay': alarm.timeOfDay,
         'type': alarm.type,
+        'slotNumber': specificSlot, // <--- SAVED TO DB
         'isActive': true,
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -293,41 +309,40 @@ class FirestoreService {
   }
 
   Future<void> deletePatient(String id) async {
-    await _db.collection('patients').doc(id).delete();
+    // Delete subcollections first
+    final pRef = _db.collection('patients').doc(id);
+    final alarms = await pRef.collection('alarms').get();
+    for(var a in alarms.docs) {
+       final meds = await a.reference.collection('medications').get();
+       for(var m in meds.docs) await m.reference.delete();
+       await a.reference.delete();
+    }
+    final history = await pRef.collection('history').get();
+    for(var h in history.docs) await h.reference.delete();
+    
+    await pRef.delete();
   }
 
-  // --- Inventory Refill ---
   Future<void> refillSlot(String patientId, String slotNumber) async {
     await _db.collection('patients').doc(patientId).update({
-      'slotInventory.$slotNumber': 3, // Reset to Max
+      'slotInventory.$slotNumber': 3,
     });
   }
 
-  // --- Action Recording with Inventory Decrement ---
+  // --- Action Recording ---
   Future<void> markTaken(String pId, String aId, List<Medication> meds) async {
     final pRef = _db.collection('patients').doc(pId);
     final pSnap = await pRef.get();
     final pData = pSnap.data();
 
-    // Determine slot based on alarm Type and Patient Number
     final aSnap = await pRef.collection('alarms').doc(aId).get();
     final aData = aSnap.data();
     String type = aData?['type'] ?? 'Breakfast';
     int pNum = pData?['patientNumber'] ?? 0;
     
-    // Logic to find slot from Type + PatientNum mapping
-    String targetSlot = "0";
-    if (pNum <= 4) {
-      if (type == 'Breakfast') targetSlot = pNum.toString();
-      else if (type == 'Lunch') targetSlot = (pNum + 4).toString();
-      else if (type == 'Dinner') targetSlot = (pNum + 8).toString();
-    } else {
-      if (type == 'Breakfast') targetSlot = (pNum + 8).toString();
-      else if (type == 'Lunch') targetSlot = (pNum + 12).toString();
-      else if (type == 'Dinner') targetSlot = (pNum + 16).toString();
-    }
+    // Use stored slot if available, else calc
+    String targetSlot = aData?['slotNumber'] ?? _calculateSlot(pNum, type);
 
-    // Decrement Inventory
     if (pData != null && pData['slotInventory'] != null) {
       Map<String, dynamic> inv = pData['slotInventory'];
       int current = inv[targetSlot] ?? 0;
@@ -336,12 +351,19 @@ class FirestoreService {
       }
     }
 
-    await _recordAction(pId, aId, meds, 'taken', targetSlot, pData?['createdBy'] ?? 'Unknown');
+    await _recordAction(pId, aId, meds, 'taken', targetSlot, type, pData?['createdBy'] ?? 'Unknown');
   }
 
   Future<void> markSkipped(String pId, String aId, List<Medication> meds) async {
-     // Skipped does not decrement inventory
-    await _recordAction(pId, aId, meds, 'skipped', 'N/A', 'N/A');
+     // Retrieve type/slot for history even if skipped
+    final pRef = _db.collection('patients').doc(pId);
+    final pSnap = await pRef.get();
+    final aSnap = await pRef.collection('alarms').doc(aId).get();
+    String type = aSnap.data()?['type'] ?? 'Breakfast';
+    int pNum = pSnap.data()?['patientNumber'] ?? 0;
+    String targetSlot = aSnap.data()?['slotNumber'] ?? _calculateSlot(pNum, type);
+
+    await _recordAction(pId, aId, meds, 'skipped', targetSlot, type, 'N/A');
   }
 
   Future<void> _recordAction(
@@ -350,13 +372,13 @@ class FirestoreService {
     List<Medication> meds,
     String status,
     String slotUsed,
+    String mealType,
     String adminName,
   ) async {
     final now = DateTime.now();
     final dateStr = DateFormat('yyyy-MM-dd').format(now);
     final timeStr = DateFormat('HH:mm').format(now);
 
-    // Update Status in Subcollection (for Dashboard Chart)
     final alarmRef = _db.collection('patients').doc(patientId).collection('alarms').doc(alarmId);
     final medsSnapshot = await alarmRef.collection('medications').get();
     
@@ -369,7 +391,6 @@ class FirestoreService {
       }
     }
 
-    // Add to History (for PDF Reports)
     final historyRef = _db.collection('patients').doc(patientId).collection('history');
     for (var med in meds) {
       await historyRef.add({
@@ -379,13 +400,13 @@ class FirestoreService {
         'date': dateStr,
         'time': timeStr,
         'slot': slotUsed,
-        'adminName': adminName, // Recorded here for report
+        'mealType': mealType, // <--- SAVED TO HISTORY
+        'adminName': adminName, 
         'alarmId': alarmId,
       });
     }
   }
 
-  // --- 6. Fetch History for Reports (Enhanced) ---
   Future<List<HistoryRecord>> getHistory(DateTime? date) async {
     List<HistoryRecord> records = [];
     String? targetDateStr = date != null ? DateFormat('yyyy-MM-dd').format(date) : null;
@@ -408,8 +429,9 @@ class FirestoreService {
           patientNumber: pData['patientNumber'],
           medicationName: hData['medicationName'] ?? '-',
           status: hData['status'] ?? 'UNKNOWN',
-          adminName: pData['createdBy'] ?? 'Unknown',
+          adminName: hData['adminName'] ?? pData['createdBy'] ?? 'Unknown',
           slot: hData['slot'] ?? '-',
+          mealType: hData['mealType'] ?? '-', // <--- RETRIEVED FROM HISTORY
           actionTime: (hData['actionTime'] as Timestamp).toDate(),
         ));
       }
@@ -417,7 +439,6 @@ class FirestoreService {
     return records;
   }
 
-  // --- PDF Generation (Updated) ---
   Future<void> generatePdfReport(
     List<HistoryRecord> records,
     BuildContext context,
@@ -430,9 +451,10 @@ class FirestoreService {
       r.patientName,
       r.patientNumber.toString(),
       r.medicationName,
+      r.mealType, // <--- ADDED TO PDF
+      r.slot,
       DateFormat('HH:mm').format(r.actionTime),
       r.status.toUpperCase(),
-      r.slot,
       r.adminName,
     ]).toList();
 
@@ -447,7 +469,7 @@ class FirestoreService {
             ])),
             pw.SizedBox(height: 20),
             pw.Table.fromTextArray(
-              headers: ['Patient', 'No.', 'Medication', 'Time', 'Status', 'Slot', 'Admin'],
+              headers: ['Patient', 'No.', 'Medication', 'Meal', 'Slot', 'Time', 'Status', 'Admin'],
               data: tableData,
               headerDecoration: pw.BoxDecoration(color: PdfColor.fromHex('1565C0')),
               headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold),
@@ -460,7 +482,6 @@ class FirestoreService {
       ),
     );
 
-    // Save File
     String path;
     if (Platform.isAndroid) {
       final directory = await getExternalStorageDirectory();

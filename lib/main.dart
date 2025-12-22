@@ -11,7 +11,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart'; // Import Notifications
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import 'firebase_options.dart';
 import 'services.dart';
@@ -20,15 +20,12 @@ import 'dashboard.dart';
 import 'welcome_screen.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-
-// --- NOTIFICATIONS SETUP ---
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Initialize Notifications
   const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
   const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
   await flutterLocalNotificationsPlugin.initialize(initializationSettings);
@@ -131,7 +128,6 @@ class KioskState extends ChangeNotifier {
     }
   }
 
-  // --- SHOW PHONE NOTIFICATION ---
   Future<void> _showNotification(String title, String body) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       'alarm_channel', 'PillPal Alarms',
@@ -141,7 +137,7 @@ class KioskState extends ChangeNotifier {
     );
     const NotificationDetails details = NotificationDetails(android: androidDetails);
     await flutterLocalNotificationsPlugin.show(
-      DateTime.now().millisecond, // Unique ID
+      DateTime.now().millisecond,
       title,
       body,
       details,
@@ -160,8 +156,23 @@ class KioskState extends ChangeNotifier {
     isAlarmActive = true;
     notifyListeners();
 
-    // Trigger Notification
-    _showNotification("Time for Medication!", "${p.name} - Slot ${p.slotNumber}");
+    // Use specific slot number if available, else calc (fallback logic for old data)
+    String slotToDisplay = a.slotNumber ?? "?"; 
+    
+    // Fallback logic if slotNumber wasn't saved in DB yet
+    if (slotToDisplay == "?" || slotToDisplay.isEmpty) {
+       if (p.patientNumber <= 4) {
+          if (a.type == 'Breakfast') slotToDisplay = p.patientNumber.toString();
+          else if (a.type == 'Lunch') slotToDisplay = (p.patientNumber + 4).toString();
+          else if (a.type == 'Dinner') slotToDisplay = (p.patientNumber + 8).toString();
+       } else {
+          if (a.type == 'Breakfast') slotToDisplay = (p.patientNumber + 8).toString();
+          else if (a.type == 'Lunch') slotToDisplay = (p.patientNumber + 12).toString();
+          else if (a.type == 'Dinner') slotToDisplay = (p.patientNumber + 16).toString();
+       }
+    }
+
+    _showNotification("Time for Medication!", "${p.name} - Slot $slotToDisplay");
 
     try {
       await _audioPlayer.setVolume(1.0);
@@ -187,7 +198,10 @@ class KioskState extends ChangeNotifier {
     }
 
     if (activePatient != null && activeAlarm != null) {
-      final msg = jsonEncode({'command': 'DISPENSE', 'slot': activePatient!.slotNumber});
+      // Get the specific slot to send to MQTT
+      String slotToSend = activeAlarm!.slotNumber ?? "0"; 
+      
+      final msg = jsonEncode({'command': 'DISPENSE', 'slot': slotToSend});
       final builder = MqttClientPayloadBuilder();
       builder.addString(msg);
       _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
@@ -237,7 +251,6 @@ class KioskState extends ChangeNotifier {
   }
 }
 
-// ... KioskModeScreen and AlarmPopup remain standard (same as previous) ...
 class KioskModeScreen extends StatelessWidget {
   const KioskModeScreen({super.key});
   @override
@@ -322,6 +335,10 @@ class AlarmPopup extends StatelessWidget {
         final p = state.activePatient;
         final a = state.activeAlarm;
         if (p == null || a == null) return const Scaffold();
+
+        // DISPLAY ONLY THE SPECIFIC SLOT
+        String slotDisplay = a.slotNumber ?? "Unknown";
+
         return Scaffold(
           backgroundColor: const Color(0xFF1565C0),
           body: Center(
@@ -337,9 +354,9 @@ class AlarmPopup extends StatelessWidget {
                     padding: const EdgeInsets.all(24),
                     decoration: const BoxDecoration(color: Color(0xFFE3F2FD), borderRadius: BorderRadius.only(topLeft: Radius.circular(32), topRight: Radius.circular(32))),
                     child: Column(children: [
-                       const Icon(Icons.medication_liquid, size: 60, color: Color(0xFF1565C0)),
-                       const SizedBox(height: 16),
-                       Text("IT'S TIME FOR MEDICINE", style: GoogleFonts.poppins(fontSize: 22, fontWeight: FontWeight.bold, color: const Color(0xFF1565C0))),
+                      const Icon(Icons.medication_liquid, size: 60, color: Color(0xFF1565C0)),
+                      const SizedBox(height: 16),
+                      Text("IT'S TIME FOR MEDICINE", style: GoogleFonts.poppins(fontSize: 22, fontWeight: FontWeight.bold, color: const Color(0xFF1565C0))),
                     ]),
                   ),
                   Padding(
@@ -347,7 +364,8 @@ class AlarmPopup extends StatelessWidget {
                     child: Column(children: [
                       Text(p.name, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
-                      Container(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.orange)), child: Text("TRAY SLOT: ${p.slotNumber}", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.deepOrange))),
+                      // SPECIFIC SLOT DISPLAY ONLY
+                      Container(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8), decoration: BoxDecoration(color: Colors.orange.withOpacity(0.1), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.orange)), child: Text("TRAY SLOT: $slotDisplay", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.deepOrange))),
                       const SizedBox(height: 32),
                       const Text("Medications Due:", style: TextStyle(fontSize: 16, color: Colors.grey, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 10),
