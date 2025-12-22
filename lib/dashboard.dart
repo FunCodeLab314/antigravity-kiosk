@@ -58,9 +58,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } else {
       availableNum = await _db.getNextAvailablePatientNumber();
       if (availableNum == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Maximum 8 patients reached!"))
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Maximum 8 patients reached!"))
+          );
+        }
         return;
       }
     }
@@ -69,7 +71,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final ageCtrl = TextEditingController(text: isEditing ? patientToEdit.age.toString() : '');
     String gender = isEditing ? patientToEdit.gender : "Male";
     
-    // Initialize alarms - one per meal type
+    // Initialize alarms - start empty if new patient
     List<Map<String, dynamic>> tempAlarms = [];
     if (isEditing) {
       for (var alarm in patientToEdit.alarms) {
@@ -79,18 +81,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           'medication': alarm.medication,
         });
       }
-    } else {
-      // Default alarms for new patient
-      tempAlarms = [
-        {'time': '08:00', 'mealType': 'breakfast', 'medication': null},
-        {'time': '13:00', 'mealType': 'lunch', 'medication': null},
-        {'time': '19:00', 'mealType': 'dinner', 'medication': null},
-      ];
     }
 
     final formKey = GlobalKey<FormState>();
     double dialogWidth = MediaQuery.of(context).size.width * 0.9;
     if (dialogWidth > 500) dialogWidth = 500;
+
+    if (!mounted) return;
 
     showDialog(
       context: context,
@@ -99,6 +96,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
         return StatefulBuilder(
           builder: (context, setState) {
             bool isSaving = false;
+
+            // Helper to add a meal schedule
+            void addMealSchedule(String type) {
+              String defaultTime = "08:00";
+              if (type == "lunch") defaultTime = "13:00";
+              if (type == "dinner") defaultTime = "19:00";
+
+              setState(() {
+                tempAlarms.add({
+                  'time': defaultTime,
+                  'mealType': type,
+                  'medication': null,
+                });
+                
+                // Sort meals to keep them in order (Breakfast -> Lunch -> Dinner)
+                final order = {'breakfast': 1, 'lunch': 2, 'dinner': 3};
+                tempAlarms.sort((a, b) => (order[a['mealType']] ?? 0).compareTo(order[b['mealType']] ?? 0));
+              });
+            }
 
             void editMedication(int alarmIndex) {
               final currentMed = tempAlarms[alarmIndex]['medication'] as Medication?;
@@ -242,8 +258,47 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           "Medication Schedule",
                           style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)
                         ),
+                        const SizedBox(height: 10),
+
+                        // Add Buttons Row
+                        Wrap(
+                          spacing: 8.0,
+                          children: [
+                            if (!tempAlarms.any((a) => a['mealType'] == 'breakfast'))
+                              ActionChip(
+                                avatar: const Icon(Icons.wb_sunny, size: 16, color: Colors.orange),
+                                label: const Text("Add Breakfast"),
+                                onPressed: () => addMealSchedule('breakfast'),
+                                backgroundColor: Colors.orange[50],
+                              ),
+                            if (!tempAlarms.any((a) => a['mealType'] == 'lunch'))
+                              ActionChip(
+                                avatar: const Icon(Icons.wb_cloudy, size: 16, color: Colors.blue),
+                                label: const Text("Add Lunch"),
+                                onPressed: () => addMealSchedule('lunch'),
+                                backgroundColor: Colors.blue[50],
+                              ),
+                            if (!tempAlarms.any((a) => a['mealType'] == 'dinner'))
+                              ActionChip(
+                                avatar: const Icon(Icons.nightlight_round, size: 16, color: Colors.purple),
+                                label: const Text("Add Dinner"),
+                                onPressed: () => addMealSchedule('dinner'),
+                                backgroundColor: Colors.purple[50],
+                              ),
+                          ],
+                        ),
+                        if (tempAlarms.isEmpty) 
+                          const Padding(
+                            padding: EdgeInsets.all(20.0),
+                            child: Center(
+                              child: Text(
+                                "No schedules added yet.",
+                                style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+                              ),
+                            ),
+                          ),
                         
-                        // Alarms (Breakfast, Lunch, Dinner)
+                        // Alarms List
                         ...tempAlarms.asMap().entries.map((entry) {
                           int index = entry.key;
                           Map<String, dynamic> alarm = entry.value;
@@ -317,6 +372,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                           ],
                                         ),
                                       ),
+                                      const SizedBox(width: 10),
+                                      // Delete Button
+                                      InkWell(
+                                        onTap: () {
+                                          setState(() {
+                                            tempAlarms.removeAt(index);
+                                          });
+                                        },
+                                        child: const Icon(Icons.close, color: Colors.red, size: 20),
+                                      ),
                                     ],
                                   ),
                                   const Divider(),
@@ -365,11 +430,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                   onPressed: isSaving ? null : () async {
                     if (formKey.currentState!.validate()) {
-                      // Validate all meals have medications
+                      // Validate all meals have medications if any are added
                       bool allHaveMeds = tempAlarms.every((a) => a['medication'] != null);
-                      if (!allHaveMeds) {
+                      if (!allHaveMeds && tempAlarms.isNotEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("Please add medication for all meals"))
+                          const SnackBar(content: Text("Please add medication for all created schedules"))
                         );
                         return;
                       }
