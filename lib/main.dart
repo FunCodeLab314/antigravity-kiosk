@@ -12,6 +12,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 
 import 'firebase_options.dart';
 import 'services.dart';
@@ -27,22 +29,89 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
 
+// Simple incremental ID so multiple notifications don't overwrite each other
+int _notificationIdCounter = 0;
+
+tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
+  final now = tz.TZDateTime.now(tz.local);
+  var scheduled =
+      tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+  if (scheduled.isBefore(now)) {
+    scheduled = scheduled.add(const Duration(days: 1));
+  }
+  return scheduled;
+}
+
+Future<void> scheduleDailyAlarmNotification({
+  required Patient patient,
+  required AlarmModel alarm,
+  required bool isCreator,
+}) async {
+  final title =
+      isCreator ? "💊 Time for Medication!" : "💊 Patient Medication Alert";
+  final body =
+      "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})";
+
+  final androidDetails = AndroidNotificationDetails(
+    'alarm_channel',
+    'Medication Alarm',
+    channelDescription: 'Medication reminders',
+    importance: Importance.max,
+    priority: Priority.high,
+    playSound: true,
+    enableVibration: true,
+  );
+
+  final details = NotificationDetails(android: androidDetails);
+
+  await flutterLocalNotificationsPlugin.zonedSchedule(
+    _notificationIdCounter++,
+    title,
+    body,
+    _nextInstanceOfTime(alarm.hour, alarm.minute),
+    details,
+    androidAllowWhileIdle: true,
+    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+    uiLocalNotificationDateInterpretation:
+        UILocalNotificationDateInterpretation.absoluteTime,
+    matchDateTimeComponents: DateTimeComponents.time,
+    payload: jsonEncode({
+      'type': 'alarm',
+      'patientId': patient.id,
+      'alarmId': alarm.id,
+      'isCreator': isCreator,
+    }),
+  );
+}
+
 // Handle notification tap when app is closed/background
 Future<void> _onNotificationTap(NotificationResponse response) async {
   final payload = response.payload;
-  if (payload != null) {
-    final data = jsonDecode(payload);
-    
-    // If this is an alarm for the current user, show the alarm popup
-    if (data['isCreator'] == true && data['type'] == 'alarm') {
-      navigatorKey.currentState?.pushNamed('/alarm');
-    }
+  if (payload == null) return;
+
+  final data = jsonDecode(payload);
+
+  // IMPORTANT:
+  // Alarms are already handled by the in-app queue (_processQueue).
+  // Navigating to '/alarm' again here causes the popup to appear twice
+  // (once from the queue, once from the notification tap).
+  //
+  // So for 'alarm' payloads we just let the app open / resume and allow
+  // the existing logic to show the popup once.
+  //
+  // For other notification types (e.g. refill), you can still deep‑link.
+  if (data['type'] == 'refill') {
+    navigatorKey.currentState?.pushNamed('/notifications');
   }
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // Timezone setup for scheduled notifications
+  tz.initializeTimeZones();
+  tz.setLocalLocation(tz.getLocation('Asia/Manila')); // Adjust if needed
 
   // Initialize Notifications with tap handler
   const AndroidInitializationSettings initializationSettingsAndroid =
@@ -128,9 +197,29 @@ class KioskState extends ChangeNotifier {
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   KioskState() {
-    _db.getPatients().listen((data) {
+    _db.getPatients().listen((data) async {
       patients = data;
       _checkLowStock();
+
+      // Schedule daily notifications for all alarms for the current user.
+      final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
+      if (currentUserUid != null) {
+        // Clear previous schedules to avoid duplicates
+        await flutterLocalNotificationsPlugin.cancelAll();
+
+        for (var p in patients) {
+          final isCreator = p.createdByUid == currentUserUid;
+          for (var a in p.alarms) {
+            if (!a.isActive) continue;
+            await scheduleDailyAlarmNotification(
+              patient: p,
+              alarm: a,
+              isCreator: isCreator,
+            );
+          }
+        }
+      }
+
       notifyListeners();
     });
 
@@ -154,6 +243,22 @@ class KioskState extends ChangeNotifier {
     for (var p in patients) {
       for (var a in p.alarms) {
         if (!a.isActive) continue;
+
+        // If this alarm was already acted on (taken/skipped) today recently,
+        // don't trigger it again even if the app was closed and reopened.
+        final lastAction = a.medication.lastActionAt;
+        if (lastAction != null) {
+          final sameDay =
+              lastAction.year == now.year &&
+              lastAction.month == now.month &&
+              lastAction.day == now.day;
+          final recentlyHandled = sameDay &&
+              lastAction.isAfter(now.subtract(const Duration(minutes: 5)));
+          if (recentlyHandled) {
+            continue;
+          }
+        }
+
         if (a.hour == now.hour && a.minute == now.minute) {
           // Check if this is the creator's patient
           bool isCreator = p.createdByUid == currentUserUid;
@@ -270,7 +375,7 @@ Future<void> _showNotification({
       NotificationDetails(android: androidDetails);
 
   await flutterLocalNotificationsPlugin.show(
-    0,
+    _notificationIdCounter++,
     title,
     body,
     details,
