@@ -27,16 +27,41 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
 
+// Handle notification tap when app is closed/background
+Future<void> _onNotificationTap(NotificationResponse response) async {
+  final payload = response.payload;
+  if (payload != null) {
+    final data = jsonDecode(payload);
+    
+    // If this is an alarm for the current user, show the alarm popup
+    if (data['isCreator'] == true && data['type'] == 'alarm') {
+      navigatorKey.currentState?.pushNamed('/alarm');
+    }
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Initialize Notifications
+  // Initialize Notifications with tap handler
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
   const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveNotificationResponse: _onNotificationTap,
+  );
+
+  // Request notification permissions (Android 13+)
+  if (Platform.isAndroid) {
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+  }
 
   runApp(const PillPalApp());
 }
@@ -48,6 +73,7 @@ class PillPalApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ChangeNotifierProvider(
       create: (_) => KioskState(),
+      lazy: false,
       child: MaterialApp(
         navigatorKey: navigatorKey,
         debugShowCheckedModeBanner: false,
@@ -104,7 +130,7 @@ class KioskState extends ChangeNotifier {
   KioskState() {
     _db.getPatients().listen((data) {
       patients = data;
-      _checkLowStock(); // Check for low stock on every update
+      _checkLowStock();
       notifyListeners();
     });
 
@@ -119,20 +145,28 @@ class KioskState extends ChangeNotifier {
     _audioPlayer.setReleaseMode(ReleaseMode.loop);
   }
 
-  void _checkAlarms() {
+  void _checkAlarms() async {
     if (now.minute == _lastTriggeredMinute) return;
 
     bool foundAny = false;
     final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
 
     for (var p in patients) {
-      // Only trigger alarms for patients created by current user
-      if (p.createdByUid != currentUserUid) continue;
-
       for (var a in p.alarms) {
         if (!a.isActive) continue;
         if (a.hour == now.hour && a.minute == now.minute) {
-          _alarmQueue.add({'patient': p, 'alarm': a});
+          // Check if this is the creator's patient
+          bool isCreator = p.createdByUid == currentUserUid;
+          
+          _alarmQueue.add({
+            'patient': p,
+            'alarm': a,
+            'isCreator': isCreator,
+          });
+          
+          // Send notification to ALL users
+          await _sendNotificationToAllUsers(p, a, isCreator);
+          
           foundAny = true;
         }
       }
@@ -144,15 +178,67 @@ class KioskState extends ChangeNotifier {
     }
   }
 
+  // --- SEND NOTIFICATION TO ALL USERS ---
+  Future<void> _sendNotificationToAllUsers(
+    Patient patient,
+    AlarmModel alarm,
+    bool isCreator,
+  ) async {
+    // Save to Firestore notifications collection
+    await _db.saveNotification(
+      title: "💊 Medication Reminder",
+      body: "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})",
+      type: 'medication',
+      patientId: patient.id!,
+      patientNumber: patient.patientNumber,
+      creatorUid: patient.createdByUid,
+    );
+
+    // Show local notification with different payload for creator vs others
+    final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
+    final isCurrentUserCreator = patient.createdByUid == currentUserUid;
+    
+    await _showNotification(
+      title: isCurrentUserCreator 
+          ? "💊 Time for Medication!" 
+          : "💊 Patient Medication Alert",
+      body: "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})",
+      payload: jsonEncode({
+        'type': 'alarm',
+        'patientId': patient.id,
+        'alarmId': alarm.id,
+        'isCreator': isCurrentUserCreator,
+      }),
+      importance: Importance.max,
+      priority: Priority.high,
+      playSound: true,
+      enableVibration: true,
+    );
+  }
+
   // --- CHECK LOW STOCK AND SEND NOTIFICATION ---
   void _checkLowStock() async {
     for (var p in patients) {
       for (var a in p.alarms) {
         if (a.medication.needsRefill()) {
-          // Send notification to ALL users (not just creator)
+          // Save to Firestore
+          await _db.saveNotification(
+            title: "⚠️ Refill Needed",
+            body: "Patient ${p.patientNumber} - ${a.medication.name} (Slot ${a.medication.slotNumber}) needs refill",
+            type: 'refill',
+            patientId: p.id!,
+            patientNumber: p.patientNumber,
+            creatorUid: p.createdByUid,
+          );
+          
+          // Send to ALL users
           _showNotification(
-            "⚠️ Refill Needed",
-            "Patient ${p.patientNumber} - ${a.medication.name} (Slot ${a.medication.slotNumber}) needs refill",
+            title: "⚠️ Refill Needed",
+            body: "Patient ${p.patientNumber} - ${a.medication.name} (Slot ${a.medication.slotNumber}) needs refill",
+            payload: jsonEncode({
+              'type': 'refill',
+              'patientId': p.id,
+            }),
           );
         }
       }
@@ -160,24 +246,38 @@ class KioskState extends ChangeNotifier {
   }
 
   // --- SHOW PHONE NOTIFICATION ---
-  Future<void> _showNotification(String title, String body) async {
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-      'pillpal_channel',
-      'PillPal Notifications',
-      importance: Importance.max,
-      priority: Priority.high,
-      playSound: true,
-    );
-    const NotificationDetails details =
-        NotificationDetails(android: androidDetails);
-    await flutterLocalNotificationsPlugin.show(
-      DateTime.now().millisecondsSinceEpoch % 100000,
-      title,
-      body,
-      details,
-    );
-  }
+Future<void> _showNotification({
+  required String title,
+  required String body,
+  String? payload,
+  Importance importance = Importance.high,
+  Priority priority = Priority.high,
+  bool playSound = true,
+  bool enableVibration = true,
+}) async {
+  final AndroidNotificationDetails androidDetails =
+      AndroidNotificationDetails(
+    'alarm_channel',
+    'Medication Alarm',
+    channelDescription: 'Medication reminders',
+    importance: importance,
+    priority: priority,
+    playSound: playSound,
+    enableVibration: enableVibration,
+  );
+
+  final NotificationDetails details =
+      NotificationDetails(android: androidDetails);
+
+  await flutterLocalNotificationsPlugin.show(
+    0,
+    title,
+    body,
+    details,
+    payload: payload,
+  );
+}
+
 
   void _processQueue() async {
     if (isAlarmActive || _alarmQueue.isEmpty) return;
@@ -185,26 +285,29 @@ class KioskState extends ChangeNotifier {
     final nextItem = _alarmQueue.removeAt(0);
     Patient p = nextItem['patient'];
     AlarmModel a = nextItem['alarm'];
+    bool isCreator = nextItem['isCreator'] ?? false;
 
-    activePatient = p;
-    activeAlarm = a;
-    isAlarmActive = true;
-    notifyListeners();
+    // Only show popup and play sound for the creator
+    if (isCreator) {
+      activePatient = p;
+      activeAlarm = a;
+      isAlarmActive = true;
+      notifyListeners();
 
-    // Trigger Notification - only to user who created this patient
-    _showNotification(
-      "💊 Time for Medication!",
-      "${p.name} - ${a.medication.name} (${a.mealType.toUpperCase()})",
-    );
+      try {
+        await _audioPlayer.setVolume(1.0);
+        await _audioPlayer.resume();
+      } catch (e) {
+        print("Error playing sound: $e");
+      }
 
-    try {
-      await _audioPlayer.setVolume(1.0);
-      await _audioPlayer.resume();
-    } catch (e) {
-      print("Error playing sound: $e");
+      navigatorKey.currentState?.pushNamed('/alarm');
+    } else {
+      // For non-creators, just continue to next alarm
+      Future.delayed(const Duration(milliseconds: 500), () {
+        _processQueue();
+      });
     }
-
-    navigatorKey.currentState?.pushNamed('/alarm');
   }
 
   void dispense(BuildContext context) async {

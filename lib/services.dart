@@ -225,6 +225,33 @@ class HistoryRecord {
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
+  // --- NOTIFICATION METHODS ---
+  
+  /// Save notification to Firestore (visible to all users)
+  Future<void> saveNotification({
+    required String title,
+    required String body,
+    required String type, // 'medication', 'refill', 'info'
+    String? patientId,
+    int? patientNumber,
+    String? creatorUid,
+  }) async {
+    try {
+      await _db.collection('notifications').add({
+        'title': title,
+        'body': body,
+        'type': type,
+        'patientId': patientId,
+        'patientNumber': patientNumber,
+        'creatorUid': creatorUid,
+        'timestamp': FieldValue.serverTimestamp(),
+        'isRead': false,
+      });
+    } catch (e) {
+      print("Error saving notification: $e");
+    }
+  }
+
   // --- 1. Get Available Patient Number (1-8) ---
   Future<int?> getNextAvailablePatientNumber() async {
     final snapshot = await _db.collection('patients').get();
