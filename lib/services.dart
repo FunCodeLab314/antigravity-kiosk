@@ -311,16 +311,24 @@ class FirestoreService {
       List<List<String>> historyRows = [];
 
       for (var p in patients) {
+        // Fetch without orderBy to avoid needing composite index
         final historySnap = await _db
             .collection('patients')
             .doc(p.id)
             .collection('history')
             .where('date', isEqualTo: dateStr)
-            .orderBy('actionTime', descending: false)
             .get();
+        
+        // Sort in memory by time string
+        final sortedDocs = historySnap.docs.toList()
+          ..sort((a, b) {
+            final timeA = a.data()['time'] ?? '00:00';
+            final timeB = b.data()['time'] ?? '00:00';
+            return timeA.compareTo(timeB);
+          });
 
-        if (historySnap.docs.isNotEmpty) {
-          for (var doc in historySnap.docs) {
+        if (sortedDocs.isNotEmpty) {
+          for (var doc in sortedDocs) {
             final data = doc.data();
             String time = data['time'] ?? "Unknown";
             
