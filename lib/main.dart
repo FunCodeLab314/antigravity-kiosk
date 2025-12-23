@@ -1,772 +1,96 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:mqtt_client/mqtt_client.dart';
-import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:intl/intl.dart';
-import 'package:audioplayers/audioplayers.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
-import 'package:timezone/timezone.dart' as tz;
+import 'package:google_fonts/google_fonts.dart';
 
 import 'firebase_options.dart';
-import 'services.dart';
-import 'auth_screens.dart';
-import 'dashboard.dart';
-import 'welcome_screen.dart';
-import 'history_screen.dart';
-import 'notifications_screen.dart';
-
-final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
-
-// --- NOTIFICATIONS SETUP ---
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
-
-// Simple incremental ID so multiple notifications don't overwrite each other
-int _notificationIdCounter = 0;
-
-tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
-  final now = tz.TZDateTime.now(tz.local);
-  var scheduled =
-      tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
-  if (scheduled.isBefore(now)) {
-    scheduled = scheduled.add(const Duration(days: 1));
-  }
-  return scheduled;
-}
-
-Future<void> scheduleDailyAlarmNotification({
-  required Patient patient,
-  required AlarmModel alarm,
-  required bool isCreator,
-}) async {
-  final title =
-      isCreator ? "💊 Time for Medication!" : "💊 Patient Medication Alert";
-  final body =
-      "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})";
-
-  final androidDetails = AndroidNotificationDetails(
-    'alarm_channel',
-    'Medication Alarm',
-    channelDescription: 'Medication reminders',
-    importance: Importance.max,
-    priority: Priority.high,
-    playSound: true,
-    enableVibration: true,
-  );
-
-  final details = NotificationDetails(android: androidDetails);
-
-  await flutterLocalNotificationsPlugin.zonedSchedule(
-    _notificationIdCounter++,
-    title,
-    body,
-    _nextInstanceOfTime(alarm.hour, alarm.minute),
-    details,
-    androidAllowWhileIdle: true,
-    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-    uiLocalNotificationDateInterpretation:
-        UILocalNotificationDateInterpretation.absoluteTime,
-    matchDateTimeComponents: DateTimeComponents.time,
-    payload: jsonEncode({
-      'type': 'alarm',
-      'patientId': patient.id,
-      'alarmId': alarm.id,
-      'isCreator': isCreator,
-    }),
-  );
-}
-
-// Handle notification tap when app is closed/background
-Future<void> _onNotificationTap(NotificationResponse response) async {
-  final payload = response.payload;
-  if (payload == null) return;
-
-  final data = jsonDecode(payload);
-
-  // IMPORTANT:
-  // Alarms are already handled by the in-app queue (_processQueue).
-  // Navigating to '/alarm' again here causes the popup to appear twice
-  // (once from the queue, once from the notification tap).
-  //
-  // So for 'alarm' payloads we just let the app open / resume and allow
-  // the existing logic to show the popup once.
-  //
-  // For other notification types (e.g. refill), you can still deep‑link.
-  if (data['type'] == 'refill') {
-    navigatorKey.currentState?.pushNamed('/notifications');
-  }
-}
+import 'widgets/app_lifecycle_manager.dart';
+import 'screens/auth_screen.dart';
+import 'screens/dashboard_screen.dart';
+import 'screens/kiosk_mode_screen.dart';
+import 'screens/notifications_screen.dart';
+import 'screens/history_screen.dart';
+import 'screens/alarm_popup.dart';
+import 'providers/auth_providers.dart';
+import 'providers/service_providers.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-
-  // Timezone setup for scheduled notifications
   tz.initializeTimeZones();
-  tz.setLocalLocation(tz.getLocation('Asia/Manila')); // Adjust if needed
 
-  // Initialize Notifications with tap handler
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/ic_launcher');
-  const InitializationSettings initializationSettings =
-      InitializationSettings(android: initializationSettingsAndroid);
-  
-  await flutterLocalNotificationsPlugin.initialize(
-    initializationSettings,
-    onDidReceiveNotificationResponse: _onNotificationTap,
+  runApp(
+    const ProviderScope(
+      child: PillPalApp(),
+    ),
   );
-
-  // Request notification permissions (Android 13+)
-  if (Platform.isAndroid) {
-    await flutterLocalNotificationsPlugin
-        .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>()
-        ?.requestNotificationsPermission();
-  }
-
-  runApp(const PillPalApp());
 }
 
-class PillPalApp extends StatelessWidget {
+class PillPalApp extends ConsumerStatefulWidget {
   const PillPalApp({super.key});
 
   @override
+  ConsumerState<PillPalApp> createState() => _PillPalAppState();
+}
+
+class _PillPalAppState extends ConsumerState<PillPalApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Initialize Notification Service to request permissions and handle taps
+    final notifService = ref.read(notificationServiceProvider);
+    notifService.initialize((response) {
+      if (response.payload != null) {
+        // TODO: Handle navigation based on payload
+        debugPrint("Notification Tapped: ${response.payload}");
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => KioskState(),
-      lazy: false,
-      child: MaterialApp(
-        navigatorKey: navigatorKey,
-        debugShowCheckedModeBanner: false,
-        title: 'PillPal',
-        theme: ThemeData(
-          useMaterial3: true,
-          scaffoldBackgroundColor: const Color(0xFFF5F9FF),
-          colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
-          textTheme: GoogleFonts.poppinsTextTheme(),
-        ),
-        home: StreamBuilder<User?>(
-          stream: FirebaseAuth.instance.authStateChanges(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Scaffold(
-                  body: Center(child: CircularProgressIndicator()));
-            }
-            if (snapshot.hasData) {
-              return const DashboardScreen();
-            }
-            return const WelcomeScreen();
-          },
-        ),
-        routes: {
-          '/kiosk': (_) => const KioskModeScreen(),
-          '/alarm': (_) => const AlarmPopup(),
-          '/history': (_) => const HistoryScreen(),
-          '/notifications': (_) => const NotificationsScreen(),
-        },
+    return MaterialApp(
+      title: 'PillPal Kiosk',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
+        useMaterial3: true,
+        fontFamily: GoogleFonts.rubik().fontFamily,
       ),
-    );
-  }
-}
-
-class KioskState extends ChangeNotifier {
-  final FirestoreService _db = FirestoreService();
-  List<Patient> patients = [];
-
-  late MqttServerClient _client;
-  String mqttStatus = "Disconnected";
-  final String _topicCmd = 'pillpal/device001/cmd';
-
-  DateTime now = DateTime.now();
-  int _lastTriggeredMinute = -1;
-  bool isAlarmActive = false;
-
-  List<Map<String, dynamic>> _alarmQueue = [];
-
-  Patient? activePatient;
-  AlarmModel? activeAlarm;
-
-  final AudioPlayer _audioPlayer = AudioPlayer();
-
-  KioskState() {
-    _db.getPatients().listen((data) async {
-      patients = data;
-      _checkLowStock();
-
-      // Schedule daily notifications for all alarms for the current user.
-      final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
-      if (currentUserUid != null) {
-        // Clear previous schedules to avoid duplicates
-        await flutterLocalNotificationsPlugin.cancelAll();
-
-        for (var p in patients) {
-          final isCreator = p.createdByUid == currentUserUid;
-          for (var a in p.alarms) {
-            if (!a.isActive) continue;
-            await scheduleDailyAlarmNotification(
-              patient: p,
-              alarm: a,
-              isCreator: isCreator,
-            );
-          }
-        }
-      }
-
-      notifyListeners();
-    });
-
-    Timer.periodic(const Duration(seconds: 1), (_) {
-      now = DateTime.now();
-      _checkAlarms();
-      notifyListeners();
-    });
-
-    _connectMqtt();
-    _audioPlayer.setSource(AssetSource('alarm_sound.mp3'));
-    _audioPlayer.setReleaseMode(ReleaseMode.loop);
-  }
-
-  void _checkAlarms() async {
-    if (now.minute == _lastTriggeredMinute) return;
-
-    bool foundAny = false;
-    final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
-
-    for (var p in patients) {
-      for (var a in p.alarms) {
-        if (!a.isActive) continue;
-
-        // If this alarm was already acted on (taken/skipped) today recently,
-        // don't trigger it again even if the app was closed and reopened.
-        final lastAction = a.medication.lastActionAt;
-        if (lastAction != null) {
-          final sameDay =
-              lastAction.year == now.year &&
-              lastAction.month == now.month &&
-              lastAction.day == now.day;
-          final recentlyHandled = sameDay &&
-              lastAction.isAfter(now.subtract(const Duration(minutes: 5)));
-          if (recentlyHandled) {
-            continue;
-          }
-        }
-
-        if (a.hour == now.hour && a.minute == now.minute) {
-          // Check if this is the creator's patient
-          bool isCreator = p.createdByUid == currentUserUid;
-          
-          _alarmQueue.add({
-            'patient': p,
-            'alarm': a,
-            'isCreator': isCreator,
-          });
-          
-          // Send notification to ALL users
-          await _sendNotificationToAllUsers(p, a, isCreator);
-          
-          foundAny = true;
-        }
-      }
-    }
-
-    if (foundAny) {
-      _lastTriggeredMinute = now.minute;
-      _processQueue();
-    }
-  }
-
-  // --- SEND NOTIFICATION TO ALL USERS ---
-  Future<void> _sendNotificationToAllUsers(
-    Patient patient,
-    AlarmModel alarm,
-    bool isCreator,
-  ) async {
-    // Save to Firestore notifications collection
-    await _db.saveNotification(
-      title: "💊 Medication Reminder",
-      body: "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})",
-      type: 'medication',
-      patientId: patient.id!,
-      patientNumber: patient.patientNumber,
-      creatorUid: patient.createdByUid,
-    );
-
-    // Show local notification with different payload for creator vs others
-    final currentUserUid = FirebaseAuth.instance.currentUser?.uid;
-    final isCurrentUserCreator = patient.createdByUid == currentUserUid;
-    
-    await _showNotification(
-      title: isCurrentUserCreator 
-          ? "💊 Time for Medication!" 
-          : "💊 Patient Medication Alert",
-      body: "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})",
-      payload: jsonEncode({
-        'type': 'alarm',
-        'patientId': patient.id,
-        'alarmId': alarm.id,
-        'isCreator': isCurrentUserCreator,
-      }),
-      importance: Importance.max,
-      priority: Priority.high,
-      playSound: true,
-      enableVibration: true,
-    );
-  }
-
-  // --- CHECK LOW STOCK AND SEND NOTIFICATION ---
-  void _checkLowStock() async {
-    for (var p in patients) {
-      for (var a in p.alarms) {
-        if (a.medication.needsRefill()) {
-          // Save to Firestore
-          await _db.saveNotification(
-            title: "⚠️ Refill Needed",
-            body: "Patient ${p.patientNumber} - ${a.medication.name} (Slot ${a.medication.slotNumber}) needs refill",
-            type: 'refill',
-            patientId: p.id!,
-            patientNumber: p.patientNumber,
-            creatorUid: p.createdByUid,
-          );
-          
-          // Send to ALL users
-          _showNotification(
-            title: "⚠️ Refill Needed",
-            body: "Patient ${p.patientNumber} - ${a.medication.name} (Slot ${a.medication.slotNumber}) needs refill",
-            payload: jsonEncode({
-              'type': 'refill',
-              'patientId': p.id,
-            }),
-          );
-        }
-      }
-    }
-  }
-
-  // --- SHOW PHONE NOTIFICATION ---
-Future<void> _showNotification({
-  required String title,
-  required String body,
-  String? payload,
-  Importance importance = Importance.high,
-  Priority priority = Priority.high,
-  bool playSound = true,
-  bool enableVibration = true,
-}) async {
-  final AndroidNotificationDetails androidDetails =
-      AndroidNotificationDetails(
-    'alarm_channel',
-    'Medication Alarm',
-    channelDescription: 'Medication reminders',
-    importance: importance,
-    priority: priority,
-    playSound: playSound,
-    enableVibration: enableVibration,
-  );
-
-  final NotificationDetails details =
-      NotificationDetails(android: androidDetails);
-
-  await flutterLocalNotificationsPlugin.show(
-    _notificationIdCounter++,
-    title,
-    body,
-    details,
-    payload: payload,
-  );
-}
-
-
-  void _processQueue() async {
-    if (isAlarmActive || _alarmQueue.isEmpty) return;
-
-    final nextItem = _alarmQueue.removeAt(0);
-    Patient p = nextItem['patient'];
-    AlarmModel a = nextItem['alarm'];
-    bool isCreator = nextItem['isCreator'] ?? false;
-
-    // Only show popup and play sound for the creator
-    if (isCreator) {
-      activePatient = p;
-      activeAlarm = a;
-      isAlarmActive = true;
-      notifyListeners();
-
-      try {
-        await _audioPlayer.setVolume(1.0);
-        await _audioPlayer.resume();
-      } catch (e) {
-        print("Error playing sound: $e");
-      }
-
-      navigatorKey.currentState?.pushNamed('/alarm');
-    } else {
-      // For non-creators, just continue to next alarm
-      Future.delayed(const Duration(milliseconds: 500), () {
-        _processQueue();
-      });
-    }
-  }
-
-  void dispense(BuildContext context) async {
-    if (mqttStatus != "Connected") {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text("Connection Error"),
-          content: const Text("Kiosk offline. Check internet."),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx), child: const Text("OK"))
-          ],
-        ),
-      );
-      return;
-    }
-
-    if (activePatient != null && activeAlarm != null) {
-      final msg = jsonEncode({
-        'command': 'DISPENSE',
-        'slot': activeAlarm!.medication.slotNumber
-      });
-      final builder = MqttClientPayloadBuilder();
-      builder.addString(msg);
-      _client.publishMessage(_topicCmd, MqttQos.atLeastOnce, builder.payload!);
-      
-      // Record as taken and reduce box count
-      await _db.markTaken(activePatient!, activeAlarm!);
-    }
-    _close();
-  }
-
-  void skip() {
-    if (activePatient != null && activeAlarm != null) {
-      _db.markSkipped(activePatient!, activeAlarm!);
-    }
-    _close();
-  }
-
-  void _close() async {
-    await _audioPlayer.stop();
-    isAlarmActive = false;
-    activePatient = null;
-    activeAlarm = null;
-    notifyListeners();
-
-    navigatorKey.currentState?.pop();
-
-    Future.delayed(const Duration(milliseconds: 500), () {
-      _processQueue();
-    });
-  }
-
-  Future<void> _connectMqtt() async {
-    _client = MqttServerClient.withPort(
-        'b18466311acb443e9753aae2266143d3.s1.eu.hivemq.cloud',
-        'PillPal_Kiosk',
-        8883);
-    _client.secure = true;
-    _client.securityContext = SecurityContext.defaultContext;
-    _client.logging(on: false);
-    _client.keepAlivePeriod = 20;
-
-    try {
-      mqttStatus = "Connecting...";
-      notifyListeners();
-      await _client.connect('pillpal_device', 'SecurePass123!');
-      mqttStatus = "Connected";
-    } catch (e) {
-      mqttStatus = "Error: $e";
-      _client.disconnect();
-    }
-    notifyListeners();
-  }
-}
-
-class KioskModeScreen extends StatelessWidget {
-  const KioskModeScreen({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<KioskState>(
-      builder: (context, state, _) {
-        return Scaffold(
-          backgroundColor: const Color(0xFF1565C0),
-          body: Stack(
-            children: [
-              Positioned(
-                  top: -50,
-                  right: -50,
-                  child: CircleAvatar(
-                      radius: 100,
-                      backgroundColor: Colors.white.withOpacity(0.1))),
-              Positioned(
-                  bottom: -50,
-                  left: -50,
-                  child: CircleAvatar(
-                      radius: 100,
-                      backgroundColor: Colors.white.withOpacity(0.1))),
-              SafeArea(
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        children: [
-                          IconButton(
-                              icon: const Icon(Icons.arrow_back,
-                                  color: Colors.white),
-                              onPressed: () => Navigator.pop(context)),
-                          const Spacer(),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: state.mqttStatus == "Connected"
-                                  ? Colors.green.withOpacity(0.2)
-                                  : Colors.red.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                  color: state.mqttStatus == "Connected"
-                                      ? Colors.greenAccent
-                                      : Colors.redAccent),
-                            ),
-                            child: Row(children: [
-                              Icon(Icons.wifi,
-                                  color: state.mqttStatus == "Connected"
-                                      ? Colors.greenAccent
-                                      : Colors.redAccent,
-                                  size: 16),
-                              const SizedBox(width: 8),
-                              Text(
-                                  state.mqttStatus == "Connected"
-                                      ? "ONLINE"
-                                      : "OFFLINE",
-                                  style: TextStyle(
-                                      color: state.mqttStatus == "Connected"
-                                          ? Colors.greenAccent
-                                          : Colors.redAccent,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12)),
-                            ]),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(DateFormat('HH:mm').format(state.now),
-                                style: GoogleFonts.rubik(
-                                    fontSize: 120,
-                                    fontWeight: FontWeight.w500,
-                                    color: Colors.white,
-                                    letterSpacing: -2)),
-                            Text(
-                                DateFormat('EEEE, MMM dd, yyyy')
-                                    .format(state.now),
-                                style: const TextStyle(
-                                    fontSize: 24, color: Colors.white70)),
-                            const SizedBox(height: 60),
-                            Container(
-                              padding: const EdgeInsets.all(24),
-                              decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.1),
-                                  borderRadius: BorderRadius.circular(24),
-                                  border: Border.all(color: Colors.white24)),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.people_outline,
-                                      color: Colors.white, size: 30),
-                                  const SizedBox(width: 16),
-                                  Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text("${state.patients.length} / 8",
-                                            style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 24,
-                                                fontWeight: FontWeight.bold)),
-                                        const Text("Active Patients",
-                                            style: TextStyle(
-                                                color: Colors.white70)),
-                                      ]),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
+      home: const AuthWrapper(),
+      // Define routes for named navigation (used by AppLifecycleManager)
+      routes: {
+        '/kiosk': (context) => const KioskModeScreen(),
+        '/alarm_popup': (context) => const AlarmPopup(),
+        '/notifications': (context) => const NotificationsScreen(),
+        '/history': (context) => const HistoryScreen(),
+      },
+      builder: (context, child) {
+        // Wrap with Lifecycle Manager to handle background events (alerts, updates)
+        return AppLifecycleManager(child: child!);
       },
     );
   }
 }
 
-class AlarmPopup extends StatelessWidget {
-  const AlarmPopup({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return Consumer<KioskState>(
-      builder: (context, state, _) {
-        final p = state.activePatient;
-        final a = state.activeAlarm;
-        if (p == null || a == null) return const Scaffold();
-        
-        IconData mealIcon = a.mealType == 'breakfast'
-            ? Icons.wb_sunny
-            : a.mealType == 'lunch'
-                ? Icons.wb_cloudy
-                : Icons.nightlight;
+class AuthWrapper extends ConsumerWidget {
+  const AuthWrapper({super.key});
 
-        return Scaffold(
-          backgroundColor: const Color(0xFF1565C0),
-          body: Center(
-            child: Container(
-              margin: const EdgeInsets.all(24),
-              constraints: const BoxConstraints(maxWidth: 500),
-              decoration: BoxDecoration(
-                  color: Colors.white, borderRadius: BorderRadius.circular(32)),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(24),
-                    decoration: const BoxDecoration(
-                        color: Color(0xFFE3F2FD),
-                        borderRadius: BorderRadius.only(
-                            topLeft: Radius.circular(32),
-                            topRight: Radius.circular(32))),
-                    child: Column(children: [
-                      const Icon(Icons.medication_liquid,
-                          size: 60, color: Color(0xFF1565C0)),
-                      const SizedBox(height: 16),
-                      Text("IT'S TIME FOR MEDICINE",
-                          style: GoogleFonts.poppins(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                              color: const Color(0xFF1565C0))),
-                    ]),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(32),
-                    child: Column(children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          CircleAvatar(
-                            backgroundColor: const Color(0xFF1565C0),
-                            child: Text("P${p.patientNumber}",
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold)),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(p.name,
-                              style: const TextStyle(
-                                  fontSize: 32, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                                color: Colors.orange.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: Colors.orange)),
-                            child: Row(
-                              children: [
-                                Icon(mealIcon,
-                                    size: 16, color: Colors.deepOrange),
-                                const SizedBox(width: 6),
-                                Text(a.mealType.toUpperCase(),
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.deepOrange)),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
-                              decoration: BoxDecoration(
-                                  color: Colors.purple.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(color: Colors.purple)),
-                              child: Text("SLOT ${a.medication.slotNumber}",
-                                  style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.purple))),
-                        ],
-                      ),
-                      const SizedBox(height: 32),
-                      const Text("Medication:",
-                          style: TextStyle(
-                              fontSize: 16,
-                              color: Colors.grey,
-                              fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 10),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.check_circle, color: Colors.green),
-                          const SizedBox(width: 12),
-                          Text(a.medication.name,
-                              style: const TextStyle(
-                                  fontSize: 20, fontWeight: FontWeight.w500))
-                        ],
-                      ),
-                      const SizedBox(height: 40),
-                      Row(children: [
-                        Expanded(
-                            child: SizedBox(
-                                height: 60,
-                                child: OutlinedButton(
-                                    onPressed: state.skip,
-                                    child: const Text("SKIP")))),
-                        const SizedBox(width: 20),
-                        Expanded(
-                            child: SizedBox(
-                                height: 60,
-                                child: ElevatedButton(
-                                    onPressed: () => state.dispense(context),
-                                    style: ElevatedButton.styleFrom(
-                                        backgroundColor:
-                                            const Color(0xFF1565C0),
-                                        foregroundColor: Colors.white),
-                                    child: const Text("DISPENSE")))),
-                      ]),
-                    ]),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final authState = ref.watch(authStateProvider);
+
+    return authState.when(
+      data: (user) {
+        if (user != null) {
+          return const DashboardScreen();
+        }
+        return const AuthScreen();
       },
+      loading: () => const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (e, trace) => Scaffold(body: Center(child: Text('Error: $e'))),
     );
   }
 }

@@ -29,9 +29,13 @@ dependencies:
   # MQTT for IoT communication
   mqtt_client: ^10.3.2
   
+  # Logger
+  logger: ^2.4.0
+
   # State Management
-  provider: ^6.1.2
-  
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+
   # UI & Fonts
   google_fonts: ^6.2.1
   fl_chart: ^0.69.0
@@ -50,6 +54,10 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  build_runner: ^2.4.9
+  riverpod_generator: ^2.4.0
+  custom_lint: ^0.6.4
+  riverpod_lint: ^2.3.10
 
 flutter:
   uses-material-design: true
