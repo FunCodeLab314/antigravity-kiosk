@@ -1,4 +1,3 @@
-
 import 'package:audioplayers/audioplayers.dart';
 import 'package:logger/logger.dart';
 import '../utils/constants.dart';
@@ -11,25 +10,23 @@ class AudioService {
   bool get isPlaying => _isPlaying;
 
   Future<void> initialize() async {
-    try {
-      await _audioPlayer.setSource(AssetSource(AppConstants.alarmSoundPath));
-      await _audioPlayer.setReleaseMode(ReleaseMode.loop);
-      _logger.i("AudioService initialized with ${AppConstants.alarmSoundPath}");
-    } catch (e) {
-      _logger.e("Error initializing AudioService: $e");
-    }
+    // Pre-configure the player
+    await _audioPlayer.setReleaseMode(ReleaseMode.loop);
+    await _audioPlayer.setPlayerMode(PlayerMode.mediaPlayer);
   }
 
   Future<void> play() async {
     if (_isPlaying) return;
     
     try {
-      await _audioPlayer.setVolume(1.0);
-      await _audioPlayer.resume();
       _isPlaying = true;
+      // FIX: Call play directly with the source. 
+      // Ensure 'alarm_sound.mp3' is defined in pubspec.yaml assets!
+      await _audioPlayer.play(AssetSource('alarm_sound.mp3'));
       _logger.i("Audio playback started");
     } catch (e) {
       _logger.e("Error playing audio: $e");
+      _isPlaying = false;
     }
   }
 
@@ -47,7 +44,5 @@ class AudioService {
 
   void dispose() {
     _audioPlayer.dispose();
-    _isPlaying = false;
-    _logger.i("AudioService disposed");
   }
 }

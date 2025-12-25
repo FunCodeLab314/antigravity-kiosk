@@ -1,7 +1,5 @@
-
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:logger/logger.dart';
@@ -9,21 +7,28 @@ import '../models/alarm_model.dart';
 import '../models/patient_model.dart';
 import '../utils/constants.dart';
 import '../utils/enums.dart';
+import 'dart:typed_data'; 
 
 class NotificationService {
   final Logger _logger = Logger();
   final FlutterLocalNotificationsPlugin _flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
-  // Simple incremental ID for one-off notifications
-  int _notificationIdCounter = 1000;
+  // Helper to check if app was launched by notification
+  Future<String?> getLaunchPayload() async {
+    final details = await _flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
+    if (details != null && details.didNotificationLaunchApp) {
+      return details.notificationResponse?.payload;
+    }
+    return null;
+  }
 
   Future<void> initialize(
       void Function(NotificationResponse)? onDidReceiveNotificationResponse) async {
+    
     const AndroidInitializationSettings initializationSettingsAndroid =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    // iOS/macOS settings can be added here
     final InitializationSettings initializationSettings =
         InitializationSettings(android: initializationSettingsAndroid);
 
@@ -33,6 +38,23 @@ class NotificationService {
     );
 
     await _requestPermissions();
+    await _createNotificationChannel();
+  }
+
+  Future<void> _createNotificationChannel() async {
+    const AndroidNotificationChannel channel = AndroidNotificationChannel(
+      AppConstants.notificationChannelId,
+      AppConstants.notificationChannelName,
+      description: AppConstants.notificationChannelDesc,
+      importance: Importance.max, // Critical for Heads-up
+      playSound: true,
+      sound: RawResourceAndroidNotificationSound('alarm_sound'), 
+    );
+
+    await _flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
   }
 
   Future<void> _requestPermissions() async {
@@ -45,20 +67,17 @@ class NotificationService {
     }
   }
 
-  tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
-    final now = tz.TZDateTime.now(tz.local);
-    var scheduled =
-        tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
-    if (scheduled.isBefore(now)) {
-      scheduled = scheduled.add(const Duration(days: 1));
+  Future<void> scheduleAllPatientAlarms(List<Patient> patients, String? currentAdminUid) async {
+    await cancelAll();
+    for (var p in patients) {
+      bool isCreator = (currentAdminUid != null && p.createdByUid == currentAdminUid);
+      for (var alarm in p.alarms) {
+        if (alarm.isActive) {
+          await scheduleDailyAlarm(patient: p, alarm: alarm, isCreator: isCreator);
+        }
+      }
     }
-    return scheduled;
-  }
-
-  // Generate a deterministic ID based on patient and alarm IDs
-  int _generateAlarmId(String patientId, String alarmId) {
-    // Combine strings and take hashcode. logical XOR to mix bits.
-    return (patientId.hashCode ^ alarmId.hashCode) & 0x7FFFFFFF;
+    _logger.i("Scheduled alarms for ${patients.length} patients");
   }
 
   Future<void> scheduleDailyAlarm({
@@ -66,25 +85,25 @@ class NotificationService {
     required AlarmModel alarm,
     required bool isCreator,
   }) async {
-    final int notificationId = _generateAlarmId(patient.id!, alarm.id!);
+    // Generate ID
+    final int notificationId = (patient.id.hashCode ^ alarm.id.hashCode) & 0x7FFFFFFF;
     
-    // Check if we should really schedule (optimization could be done here if we tracked state)
-    // For now, let's just schedule it using the deterministic ID which will update if exists
-    
-    final title = isCreator
-        ? "💊 Time for Medication!"
-        : "💊 Patient Medication Alert";
-    final body =
-        "${patient.name} - ${alarm.medication.name} (${alarm.mealType.toUpperCase()})";
+    final title = "💊 Time for Medication!";
+    final body = "${patient.name} - ${alarm.medication.name}";
 
     final androidDetails = AndroidNotificationDetails(
       AppConstants.notificationChannelId,
       AppConstants.notificationChannelName,
       channelDescription: AppConstants.notificationChannelDesc,
       importance: Importance.max,
-      priority: Priority.high,
+      priority: Priority.max,
       playSound: true,
+      sound: const RawResourceAndroidNotificationSound('alarm_sound'),
+      fullScreenIntent: true,
+      visibility: NotificationVisibility.public,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
       enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
     );
 
     final details = NotificationDetails(android: androidDetails);
@@ -96,8 +115,7 @@ class NotificationService {
         body,
         _nextInstanceOfTime(alarm.hour, alarm.minute),
         details,
-        androidAllowWhileIdle: true,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.alarmClock, // Critical for background
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
         matchDateTimeComponents: DateTimeComponents.time,
@@ -106,49 +124,146 @@ class NotificationService {
           'patientId': patient.id,
           'alarmId': alarm.id,
           'isCreator': isCreator,
+          'patientName': patient.name,
+          'medicationName': alarm.medication.name,
         }),
       );
-      _logger.d("Scheduled alarm $notificationId for ${patient.name} at ${alarm.timeOfDay}");
+      _logger.i("✅ Notification scheduled for ${patient.name} at ${alarm.hour}:${alarm.minute.toString().padLeft(2, '0')}");
     } catch (e) {
       _logger.e("Error scheduling notification: $e");
     }
   }
 
-  Future<void> cancelAlarm(String patientId, String alarmId) async {
-    final int notificationId = _generateAlarmId(patientId, alarmId);
-    await _flutterLocalNotificationsPlugin.cancel(notificationId);
-    _logger.d("Cancelled alarm $notificationId");
+  // Helper for Time calculation
+  tz.TZDateTime _nextInstanceOfTime(int hour, int minute) {
+    final now = tz.TZDateTime.now(tz.local);
+    var scheduled =
+        tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+    if (scheduled.isBefore(now)) {
+      scheduled = scheduled.add(const Duration(days: 1));
+    }
+    return scheduled;
   }
-
+  
   Future<void> cancelAll() async {
     await _flutterLocalNotificationsPlugin.cancelAll();
-    _logger.i("Cancelled all notifications");
   }
 
-  Future<void> showImmediateNotification({
-    required String title,
-    required String body,
-    String? payload,
-    NotificationType type = NotificationType.medication,
-  }) async {
+  /// Schedule a one-off test notification after [delaySeconds].
+  /// Useful to validate OS-level delivery when app is backgrounded/terminated.
+  Future<void> showTestNotification({int delaySeconds = 5}) async {
+    final int notificationId = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+    final title = "🔔 PillPal Test Notification";
+    final body = "This is a test notification scheduled in $delaySeconds seconds.";
+
     final androidDetails = AndroidNotificationDetails(
       AppConstants.notificationChannelId,
       AppConstants.notificationChannelName,
       channelDescription: AppConstants.notificationChannelDesc,
-      importance: Importance.high,
-      priority: Priority.high,
+      importance: Importance.max,
+      priority: Priority.max,
       playSound: true,
-      enableVibration: true,
+      sound: const RawResourceAndroidNotificationSound('alarm_sound'),
+      fullScreenIntent: true,
+      visibility: NotificationVisibility.public,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
     );
 
     final details = NotificationDetails(android: androidDetails);
 
-    await _flutterLocalNotificationsPlugin.show(
-      _notificationIdCounter++,
-      title,
-      body,
-      details,
-      payload: payload,
+    final scheduled = tz.TZDateTime.now(tz.local).add(Duration(seconds: delaySeconds));
+
+    try {
+      await _flutterLocalNotificationsPlugin.zonedSchedule(
+        notificationId,
+        title,
+        body,
+        scheduled,
+        details,
+        androidScheduleMode: AndroidScheduleMode.alarmClock,
+        uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+        payload: jsonEncode({'type': 'test'}),
+      );
+      _logger.i('✅ Test notification scheduled for ${scheduled.toLocal()}');
+    } catch (e) {
+      _logger.e('Error scheduling test notification: $e');
+    }
+  }
+
+  /// Show an immediate test notification (only while app process is alive).
+  Future<void> showImmediateTestNotification() async {
+    final int notificationId = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+    final title = "🔔 PillPal Immediate Test";
+    final body = "Immediate test notification (foreground process).";
+
+    final androidDetails = AndroidNotificationDetails(
+      AppConstants.notificationChannelId,
+      AppConstants.notificationChannelName,
+      channelDescription: AppConstants.notificationChannelDesc,
+      importance: Importance.max,
+      priority: Priority.max,
+      playSound: true,
+      sound: const RawResourceAndroidNotificationSound('alarm_sound'),
+      fullScreenIntent: true,
+      visibility: NotificationVisibility.public,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
     );
+
+    try {
+      await _flutterLocalNotificationsPlugin.show(
+        notificationId,
+        title,
+        body,
+        NotificationDetails(android: androidDetails),
+        payload: jsonEncode({'type': 'immediate_test'}),
+      );
+      _logger.i('✅ Immediate test notification shown');
+    } catch (e) {
+      _logger.e('Error showing immediate test notification: $e');
+    }
+  }
+
+  /// Show an immediate test notification with custom alarm data
+  Future<void> showTestNotificationWithData({
+    required String title,
+    required String body,
+    required String patientName,
+    required String medicationName,
+    required String alarmTime,
+  }) async {
+    final int notificationId = DateTime.now().millisecondsSinceEpoch & 0x7FFFFFFF;
+
+    final androidDetails = AndroidNotificationDetails(
+      AppConstants.notificationChannelId,
+      AppConstants.notificationChannelName,
+      channelDescription: AppConstants.notificationChannelDesc,
+      importance: Importance.max,
+      priority: Priority.max,
+      playSound: true,
+      sound: const RawResourceAndroidNotificationSound('alarm_sound'),
+      fullScreenIntent: true,
+      visibility: NotificationVisibility.public,
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
+    );
+
+    try {
+      await _flutterLocalNotificationsPlugin.show(
+        notificationId,
+        title,
+        body,
+        NotificationDetails(android: androidDetails),
+        payload: jsonEncode({
+          'type': 'test',
+          'patientName': patientName,
+          'medicationName': medicationName,
+          'alarmTime': alarmTime,
+        }),
+      );
+      _logger.i('✅ Test notification shown: $patientName - $medicationName at $alarmTime');
+    } catch (e) {
+      _logger.e('Error showing test notification with data: $e');
+    }
   }
 }

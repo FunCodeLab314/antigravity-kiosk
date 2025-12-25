@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'package:logger/logger.dart';
 import '../models/patient_model.dart';
@@ -13,15 +12,17 @@ class AlarmService {
 
   Timer? _timer;
   List<Patient> _currentPatients = [];
-  String? _currentUserUid;
+  String? _currentUserUid; // Store the logged-in Admin ID
   int _lastTriggeredMinute = -1;
 
   void updatePatients(List<Patient> patients) {
     _currentPatients = patients;
   }
 
-  void setCurrentUser(String uid) {
+  // Call this when the user logs in
+  void setCurrentUser(String? uid) {
     _currentUserUid = uid;
+    _logger.i("AlarmService: Current user set to $_currentUserUid");
   }
 
   void startMonitoring() {
@@ -46,7 +47,6 @@ class AlarmService {
   void _checkAlarms() {
     final now = DateTime.now();
     
-    // Prevent duplicate triggers in the same minute
     if (now.minute == _lastTriggeredMinute) return;
 
     bool foundAny = false;
@@ -55,20 +55,31 @@ class AlarmService {
       for (var a in p.alarms) {
         if (!a.isActive) continue;
 
-        // Check if handled today
         if (_wasHandledToday(a, now)) {
             continue;
         }
 
         if (a.hour == now.hour && a.minute == now.minute) {
-          bool isCreator = true; // Universal trigger for all users
           
-          _logger.i("Alarm triggered for ${p.name} - ${a.medication.name}");
+          // --- FIX: Dynamic Check ---
+          // Only return TRUE if the patient was created by the current logged-in admin.
+          bool isCreator = false;
+
+          if (_currentUserUid != null && p.createdByUid == _currentUserUid) {
+             isCreator = true;
+          }
+
+          // Debug log to help you verify it works
+          if (isCreator) {
+             _logger.i("✅ ALARM MATCH: Admin $_currentUserUid matches Patient Creator ${p.createdByUid}");
+          } else {
+             _logger.w("⚠️ SKIPPING: Alarm for ${p.name} (Created by ${p.createdByUid}) but Logged in as $_currentUserUid");
+          }
           
           _controller.add(AlarmTrigger(
             patient: p, 
             alarm: a, 
-            isCreator: isCreator,
+            isCreator: isCreator, 
             timestamp: now
           ));
           

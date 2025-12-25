@@ -6,6 +6,7 @@ import '../services/notification_service.dart';
 import '../services/audio_service.dart';
 import '../services/alarm_service.dart';
 import '../services/report_service.dart';
+import '../services/ble_service.dart';
 
 part 'service_providers.g.dart';
 
@@ -46,4 +47,25 @@ AlarmService alarmService(AlarmServiceRef ref) {
   final service = AlarmService();
   ref.onDispose(service.dispose);
   return service;
+}
+
+@Riverpod(keepAlive: true)
+BleService bleService(BleServiceRef ref) {
+  final service = BleService();
+  ref.onDispose(service.dispose);
+  return service;
+}
+
+/// Stream provider for BLE connection state
+@Riverpod(keepAlive: true)
+Stream<bool> bleConnectionState(BleConnectionStateRef ref) {
+  final bleService = ref.watch(bleServiceProvider);
+  return bleService.onConnectionStateChanged;
+}
+
+/// Simple provider to check if BLE is currently connected
+@Riverpod(keepAlive: true)
+bool bleIsConnected(BleIsConnectedRef ref) {
+  final bleService = ref.watch(bleServiceProvider);
+  return bleService.isConnected;
 }

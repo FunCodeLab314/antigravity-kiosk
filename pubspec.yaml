@@ -26,6 +26,9 @@ dependencies:
   # Audio
   audioplayers: ^6.0.0
   
+  # BLE for ESP32 communication
+  flutter_blue_plus: ^1.31.2
+  
   # MQTT for IoT communication
   mqtt_client: ^10.3.2
   

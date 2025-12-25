@@ -13,6 +13,48 @@ class NotificationsScreen extends ConsumerStatefulWidget {
 }
 
 class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
+  Future<void> _sendTestNotificationFromAlarm(WidgetRef ref) async {
+    // Get the patient list
+    final firestore = ref.read(firestoreServiceProvider);
+    final patients = await firestore.getPatients().first;
+    
+    if (patients.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('❌ No patients found!')),
+      );
+      return;
+    }
+
+    // Find the first patient with an active alarm
+    for (var patient in patients) {
+      for (var alarm in patient.alarms) {
+        if (alarm.isActive) {
+          // Send notification with real alarm data
+          final notifService = ref.read(notificationServiceProvider);
+          final title = "💊 Time for Medication!";
+          final body = "${patient.name} - ${alarm.medication.name}";
+          
+          await notifService.showTestNotificationWithData(
+            title: title,
+            body: body,
+            patientName: patient.name,
+            medicationName: alarm.medication.name,
+            alarmTime: "${alarm.hour.toString().padLeft(2, '0')}:${alarm.minute.toString().padLeft(2, '0')}",
+          );
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('✅ Test notification sent for ${patient.name}!')),
+          );
+          return;
+        }
+      }
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('❌ No active alarms found!')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final notificationService = ref.read(firestoreServiceProvider); // Using FirestoreService for notification list
@@ -22,6 +64,13 @@ class _NotificationsScreenState extends ConsumerState<NotificationsScreen> {
       appBar: AppBar(
         title: const Text("Notifications"),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.notifications_active, color: Colors.green),
+            tooltip: "Send Test Notification",
+            onPressed: () async {
+              await _sendTestNotificationFromAlarm(ref);
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.delete_sweep, color: Colors.red),
             onPressed: () {

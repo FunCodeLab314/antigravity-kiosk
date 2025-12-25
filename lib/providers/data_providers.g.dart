@@ -64,5 +64,22 @@ final mqttIsConnectedProvider = AutoDisposeProvider<bool>.internal(
 );
 
 typedef MqttIsConnectedRef = AutoDisposeProviderRef<bool>;
+String _$patientAlarmSyncHash() => r'52444e9e22197d9558f65739c110634da3da881a';
+
+/// Synchronization provider to bridge Firestore data, Auth, AlarmService, and Notifications
+///
+/// Copied from [patientAlarmSync].
+@ProviderFor(patientAlarmSync)
+final patientAlarmSyncProvider = AutoDisposeProvider<void>.internal(
+  patientAlarmSync,
+  name: r'patientAlarmSyncProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$patientAlarmSyncHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+typedef PatientAlarmSyncRef = AutoDisposeProviderRef<void>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member

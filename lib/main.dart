@@ -1,4 +1,5 @@
-
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -7,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'firebase_options.dart';
 import 'widgets/app_lifecycle_manager.dart';
+import 'widgets/ble_connection_manager.dart';
 import 'screens/auth_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/kiosk_mode_screen.dart';
@@ -15,6 +17,11 @@ import 'screens/history_screen.dart';
 import 'screens/alarm_popup.dart';
 import 'providers/auth_providers.dart';
 import 'providers/service_providers.dart';
+import 'providers/data_providers.dart';
+import 'providers/alarm_queue_provider.dart';
+import 'utils/ble_permission_manager.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,20 +46,76 @@ class _PillPalAppState extends ConsumerState<PillPalApp> {
   @override
   void initState() {
     super.initState();
-    // Initialize Notification Service to request permissions and handle taps
+    _setupServices();
+  }
+
+  Future<void> _setupServices() async {
+    // Initialize BLE permissions and scanning
+    await BlePermissionManager.initializeBleScanning();
+    
+    // Initialize notifications
+    _setupNotifications();
+  }
+
+  Future<void> _setupNotifications() async {
     final notifService = ref.read(notificationServiceProvider);
-    notifService.initialize((response) {
+    
+    // 1. Initialize and handle foreground/background taps
+    await notifService.initialize((response) {
       if (response.payload != null) {
-        // TODO: Handle navigation based on payload
-        debugPrint("Notification Tapped: ${response.payload}");
+        debugPrint("📱 Notification tapped in foreground/background");
+        _handleNotificationTap(response.payload!);
       }
     });
+
+    // 2. Handle Terminated State (App Launch from Notification)
+    // If the app was dead, we check if it was launched by a notification
+    final launchPayload = await notifService.getLaunchPayload();
+    if (launchPayload != null) {
+      debugPrint("🔔 App launched from terminated state by notification");
+      // Wait for app to fully initialize and providers to be ready
+      Future.delayed(const Duration(seconds: 3), () {
+        debugPrint("📲 Now processing terminated-state notification after delay");
+        _handleNotificationTap(launchPayload);
+      });
+    }
+
+    // In debug builds, schedule a quick test notification to validate OS delivery
+    if (kDebugMode) {
+      try {
+        debugPrint('🔧 Scheduling debug test notifications');
+        await notifService.showImmediateTestNotification();
+        await notifService.showTestNotification(delaySeconds: 10);
+      } catch (e) {
+        debugPrint('❌ Failed to schedule debug test notifications: $e');
+      }
+    }
+  }
+
+  void _handleNotificationTap(String payloadJson) {
+    try {
+      final data = jsonDecode(payloadJson);
+      debugPrint("🔍 Notification payload: $data");
+      
+      if (data['type'] == 'alarm') {
+        debugPrint("🔔 Processing alarm notification: ${data['patientName']} - ${data['medicationName']}");
+        // Pass data to AlarmQueue to force-show the popup
+        Future.delayed(const Duration(milliseconds: 500), () {
+          ref.read(alarmQueueProvider.notifier).handleNotificationTrigger(data);
+        });
+      } else if (data['type'] == 'test' || data['type'] == 'immediate_test') {
+        debugPrint("🧪 Test notification received");
+      }
+    } catch (e) {
+      debugPrint("❌ Error parsing notification payload: $e");
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'PillPal Kiosk',
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
@@ -60,7 +123,6 @@ class _PillPalAppState extends ConsumerState<PillPalApp> {
         fontFamily: GoogleFonts.rubik().fontFamily,
       ),
       home: const AuthWrapper(),
-      // Define routes for named navigation (used by AppLifecycleManager)
       routes: {
         '/kiosk': (context) => const KioskModeScreen(),
         '/alarm_popup': (context) => const AlarmPopup(),
@@ -68,8 +130,9 @@ class _PillPalAppState extends ConsumerState<PillPalApp> {
         '/history': (context) => const HistoryScreen(),
       },
       builder: (context, child) {
-        // Wrap with Lifecycle Manager to handle background events (alerts, updates)
-        return AppLifecycleManager(child: child!);
+        return BleConnectionManager(
+          child: AppLifecycleManager(child: child!),
+        );
       },
     );
   }

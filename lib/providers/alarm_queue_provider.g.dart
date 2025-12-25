@@ -6,7 +6,7 @@ part of 'alarm_queue_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$alarmQueueHash() => r'1ce4ef3185d7c3af7f64c446a46114aef000cf81';
+String _$alarmQueueHash() => r'11ab30436f0f2356d38c10c863e6a1a045a9ae0b';
 
 /// See also [AlarmQueue].
 @ProviderFor(AlarmQueue)

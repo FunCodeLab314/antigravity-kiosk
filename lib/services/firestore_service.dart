@@ -1,24 +1,19 @@
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../models/patient_model.dart';
 import '../models/alarm_model.dart';
 import '../models/medication_model.dart';
 import '../models/history_record.dart';
-
 import '../models/notification_item.dart';
 
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   // --- NOTIFICATION METHODS ---
-  // Keeping this for generic notifications, though NotificationService handles local ones.
-  // This is for Firestore 'notifications' collection (likely for admin panel sync etc).
-  
   Future<void> saveNotification({
     required String title,
     required String body,
-    required String type, // 'medication', 'refill', 'info'
+    required String type,
     String? patientId,
     int? patientNumber,
     String? creatorUid,
@@ -40,7 +35,6 @@ class FirestoreService {
   }
 
   // --- PATIENT METHODS ---
-
   Future<int?> getNextAvailablePatientNumber() async {
     final snapshot = await _db.collection('patients').get();
     Set<int> usedNumbers = snapshot.docs
@@ -50,7 +44,7 @@ class FirestoreService {
     for (int i = 1; i <= 8; i++) {
       if (!usedNumbers.contains(i)) return i;
     }
-    return null; // All 8 slots taken
+    return null;
   }
 
   Stream<List<Patient>> getPatients() {
@@ -81,8 +75,38 @@ class FirestoreService {
         });
   }
 
-  // --- HISTORY METHODS ---
+  Future<Patient?> getPatientById(String patientId) async {
+    try {
+      final doc = await _db.collection('patients').doc(patientId).get();
+      
+      if (!doc.exists) {
+        print("⚠️ Patient $patientId not found in Firestore");
+        return null;
+      }
 
+      final pData = doc.data()!;
+      final alarmSnaps = await doc.reference.collection('alarms').get();
+      List<AlarmModel> alarms = [];
+
+      for (var aDoc in alarmSnaps.docs) {
+        final aData = aDoc.data();
+        final medSnaps = await aDoc.reference.collection('medications').get();
+        
+        if (medSnaps.docs.isNotEmpty) {
+          final medData = medSnaps.docs.first.data();
+          final med = Medication.fromMap(medData, medSnaps.docs.first.id);
+          alarms.add(AlarmModel.fromMap(aData, aDoc.id, med));
+        }
+      }
+
+      return Patient.fromMap(pData, doc.id, alarms);
+    } catch (e) {
+      print("❌ Error fetching patient $patientId: $e");
+      return null;
+    }
+  }
+
+  // --- HISTORY METHODS ---
   Future<void> _recordAction(
     Patient patient,
     AlarmModel alarm,
@@ -91,7 +115,6 @@ class FirestoreService {
     try {
       final now = DateTime.now();
       
-      // Update medication status and reduce box count if taken
       final alarmRef = _db
           .collection('patients')
           .doc(patient.id)
@@ -108,7 +131,6 @@ class FirestoreService {
           'lastActionAt': FieldValue.serverTimestamp(),
         };
 
-        // Reduce box count if taken
         if (status == 'taken' && currentBoxes > 0) {
           updateData['remainingBoxes'] = currentBoxes - 1;
         }
@@ -116,7 +138,6 @@ class FirestoreService {
         await medDoc.reference.update(updateData);
       }
 
-      // Add to history collection
       await _db.collection('history').add({
         'patientId': patient.id,
         'patientName': patient.name,
@@ -169,7 +190,6 @@ class FirestoreService {
         .map((doc) => HistoryRecord.fromMap(doc.data() as Map<String, dynamic>, doc.id))
         .toList();
 
-    // Sort in memory
     records.sort((a, b) {
       switch (sortBy) {
         case 'patientName':
@@ -187,7 +207,6 @@ class FirestoreService {
   }
 
   // --- NOTIFICATION CRUD ---
-
   Stream<List<NotificationItem>> getNotificationsStream() {
     return _db
         .collection('notifications')
@@ -213,7 +232,6 @@ class FirestoreService {
   }
 
   // --- CRUD METHODS ---
-
   Future<void> addPatient(
     String name,
     int age,
@@ -246,6 +264,7 @@ class FirestoreService {
     }
   }
 
+  // FIXED: Update patient without deleting alarms
   Future<void> updatePatient(
     Patient patient,
     String name,
@@ -255,6 +274,7 @@ class FirestoreService {
   ) async {
     final pRef = _db.collection('patients').doc(patient.id);
 
+    // Update patient info
     await pRef.update({
       'name': name,
       'age': age,
@@ -262,24 +282,57 @@ class FirestoreService {
       'updatedAt': FieldValue.serverTimestamp(),
     });
 
-    // Delete old alarms
-    final oldAlarms = await pRef.collection('alarms').get();
-    for (var doc in oldAlarms.docs) {
-      final meds = await doc.reference.collection('medications').get();
-      for (var m in meds.docs) await m.reference.delete();
-      await doc.reference.delete();
+    // Get existing alarms
+    final existingAlarms = await pRef.collection('alarms').get();
+    Map<String, DocumentSnapshot> existingAlarmsMap = {
+      for (var doc in existingAlarms.docs) doc.id: doc
+    };
+
+    // Track which alarms to keep
+    Set<String> alarmsToKeep = {};
+
+    for (var newAlarm in newAlarms) {
+      if (newAlarm.id != null && existingAlarmsMap.containsKey(newAlarm.id)) {
+        // UPDATE existing alarm
+        alarmsToKeep.add(newAlarm.id!);
+        final alarmRef = pRef.collection('alarms').doc(newAlarm.id);
+        
+        await alarmRef.update({
+          'timeOfDay': newAlarm.timeOfDay,
+          'mealType': newAlarm.mealType,
+          'isActive': true,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        // Update medication
+        final medSnaps = await alarmRef.collection('medications').get();
+        if (medSnaps.docs.isNotEmpty) {
+          await medSnaps.docs.first.reference.update(newAlarm.medication.toMap());
+        } else {
+          await alarmRef.collection('medications').add(newAlarm.medication.toMap());
+        }
+      } else {
+        // ADD new alarm
+        DocumentReference aRef = await pRef.collection('alarms').add({
+          'timeOfDay': newAlarm.timeOfDay,
+          'mealType': newAlarm.mealType,
+          'isActive': true,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+
+        await aRef.collection('medications').add(newAlarm.medication.toMap());
+      }
     }
 
-    // Add new alarms
-    for (var alarm in newAlarms) {
-      DocumentReference aRef = await pRef.collection('alarms').add({
-        'timeOfDay': alarm.timeOfDay,
-        'mealType': alarm.mealType,
-        'isActive': true,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      await aRef.collection('medications').add(alarm.medication.toMap());
+    // DELETE alarms that were removed
+    for (var existingAlarm in existingAlarms.docs) {
+      if (!alarmsToKeep.contains(existingAlarm.id)) {
+        final meds = await existingAlarm.reference.collection('medications').get();
+        for (var m in meds.docs) {
+          await m.reference.delete();
+        }
+        await existingAlarm.reference.delete();
+      }
     }
   }
 

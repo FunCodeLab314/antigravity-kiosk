@@ -1,31 +1,27 @@
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers/alarm_queue_provider.dart';
-import '../providers/data_providers.dart';
-import '../utils/enums.dart';
+import '../providers/service_providers.dart';
 
 class AlarmPopup extends ConsumerWidget {
   const AlarmPopup({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(alarmQueueProvider); // Note: using generated provider name
-    // If not using generator, use alarmQueueProvider
-    // Used manual class @Riverpod so it is 'alarmQueueProvider' (the class provider)
+    final state = ref.watch(alarmQueueProvider);
     
     final trigger = state.activeTrigger;
+    
+    // FIX: When trigger becomes null (after skip/dispense), don't show a loader.
+    // Show a blank blue screen while the AppLifecycleManager pops this screen.
     if (trigger == null) {
-      // If we are on this screen but no active trigger, we should pop.
-      // However logic is usually driven by the notifier or main navigation listener.
-      // We can redirect here or show empty, but ideally the provider auto-navigates.
-      return const Scaffold(body: Center(child: CircularProgressIndicator())); 
+      return const Scaffold(backgroundColor: Color(0xFF1565C0)); 
     }
 
     final p = trigger.patient;
     final a = trigger.alarm;
-    final mqttConnected = ref.watch(mqttIsConnectedProvider);
+    final bleConnected = ref.watch(bleIsConnectedProvider);
 
     IconData mealIcon = a.mealType == 'breakfast'
         ? Icons.wb_sunny
@@ -143,8 +139,9 @@ class AlarmPopup extends ConsumerWidget {
                         child: SizedBox(
                             height: 60,
                             child: OutlinedButton(
-                                onPressed: () {
-                                  ref.read(alarmQueueProvider.notifier).skip();
+                                onPressed: () async {
+                                  await ref.read(alarmQueueProvider.notifier).skip();
+                                  // Close popup - AppLifecycleManager will handle navigation to home
                                 },
                                 child: const Text("SKIP")))),
                     const SizedBox(width: 20),
@@ -152,26 +149,27 @@ class AlarmPopup extends ConsumerWidget {
                         child: SizedBox(
                             height: 60,
                             child: ElevatedButton(
-                                onPressed: mqttConnected
-                                    ? () {
-                                        ref
+                                onPressed: bleConnected
+                                    ? () async {
+                                        await ref
                                             .read(alarmQueueProvider.notifier)
-                                            .dispense();
+                                            .dispense(slotNumber: a.medication.slotNumber);
+                                        // Close popup - AppLifecycleManager will handle navigation to home
                                       }
-                                    : null, // Disable if offline
+                                    : null,
                                 style: ElevatedButton.styleFrom(
-                                    backgroundColor: mqttConnected
+                                    backgroundColor: bleConnected
                                         ? const Color(0xFF1565C0)
                                         : Colors.grey,
                                     foregroundColor: Colors.white),
-                                child: Text(mqttConnected
+                                child: Text(bleConnected
                                     ? "DISPENSE"
                                     : "OFFLINE")))),
                   ]),
-                  if (!mqttConnected)
+                  if (!bleConnected)
                     const Padding(
                       padding: EdgeInsets.only(top: 10),
-                      child: Text("Connecting to Dispenser...",
+                      child: Text("Connecting to ESP Dispenser...",
                           style: TextStyle(color: Colors.red, fontSize: 12)),
                     )
                 ]),
